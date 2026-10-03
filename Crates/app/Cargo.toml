@@ -1,0 +1,21 @@
+[package]
+name = "linkx-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "LinkX 应用入口：Core 自检 / 后续 CLI/UI 组装"
+
+[[bin]]
+name = "linkx-app"
+path = "src/main.rs"
+
+[dependencies]
+linkx-protocol.workspace = true
+linkx-crypto.workspace = true
+linkx-session.workspace = true
+linkx-lan.workspace = true
+linkx-storage.workspace = true
+linkx-ffi.workspace = true
+prost.workspace = true
+hex.workspace = true

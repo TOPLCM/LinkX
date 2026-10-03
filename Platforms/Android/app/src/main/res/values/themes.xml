@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 界面全部由 Compose 绘制；此主题只负责窗口底色（随系统深浅色切换，见 values-night/colors.xml）
+         与去掉系统 ActionBar。字体不在此指定 → 用系统默认字体（跟随系统）。 -->
+    <style name="Theme.LinkX" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/window_background</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+
+    <!-- 磁贴 / 通知动作的落地页专用：不画界面、不压暗背景，只为拿到一次输入焦点。 -->
+    <style name="Theme.LinkX.Transparent" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:backgroundDimEnabled">false</item>
+    </style>
+</resources>

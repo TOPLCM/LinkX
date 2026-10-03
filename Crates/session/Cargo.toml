@@ -1,0 +1,16 @@
+[package]
+name = "linkx-session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "LinkX 会话层：4.5.3 状态机 / 4.5.4 心跳退避 / 配对流程（Y15）"
+
+[dependencies]
+debuglog.workspace = true
+linkx-protocol.workspace = true
+linkx-crypto.workspace = true
+thiserror.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+prost.workspace = true

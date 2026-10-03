@@ -1,0 +1,7 @@
+/* LinkX Windows 资源脚本（由 build.rs 用 MinGW windres 编译后链接进 linkx.exe）
+ *
+ * 资源 id 1 = 应用图标：Windows 用它作为 exe 图标（资源管理器 / 任务栏 / 开始菜单 /
+ * 「应用和功能」列表），代码侧由 window.rs / tray.rs 用 LoadIconW(hinst, 1) 取用。
+ * 与 MSI 的 Icon 表（LinkX.wxs）共用同一份 LinkX.ico，避免双份图标走样。
+ */
+1 ICON "LinkX.ico"

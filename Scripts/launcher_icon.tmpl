@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- LinkX 品牌图标：蓝色渐变圆角底 + 白色 logo。
+     由 Scripts/svg_assets.py 从 `svg/LinkX Logo.svg` 生成，**勿手改**；
+     与 Windows 的 LinkX.ico、导航图标的 `icons_svg.rs` 完全同源同形。
+     映射：24 网格 → 108dp 画布，(v-12)*{S}+54（网格中心对画布中心）。
+     自适应图标的安全区是 66dp，logo 撑到 18×{S}={BW}dp，四边留白足够。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:pathData="M24,4 h60 a20,20 0 0 1 20,20 v60 a20,20 0 0 1 -20,20 h-60 a20,20 0 0 1 -20,-20 v-60 a20,20 0 0 1 20,-20 z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="0"
+                android:startY="0"
+                android:endX="108"
+                android:endY="108"
+                android:type="linear">
+                <item android:offset="0" android:color="#FF1FA8E8" />
+                <item android:offset="1" android:color="#FF0F7FB8" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <path android:pathData="{PD}" android:fillColor="#FFFFFFFF" android:fillType="nonZero" />
+</vector>

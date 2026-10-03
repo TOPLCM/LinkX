@@ -1,0 +1,41 @@
+// 媒体控制：手机当前播放 → 电脑展示，电脑下发播放控制 → 手机执行
+//
+// 口径：LinkX **不搬运音频本身**，只同步"正在放什么"与控制指令。
+// 播放内容由手机侧系统 MediaSession 提供（手机上是哪个 App 在放都行），
+// 因此这里没有封面/歌词/队列等富媒体字段——那些要引额外依赖且体积不可控。
+syntax = "proto3";
+package linkx.v1;
+
+/// 当前播放状态（MEDIA_STATE 0x80 的 body；手机 → 电脑）
+message MediaState {
+  string package = 1;      // 播放来源应用包名
+  string title = 2;        // 曲目标题（空 = 该应用未提供元数据）
+  string artist = 3;       // 艺术家
+  string album = 4;        // 专辑
+  bool playing = 5;        // true = 正在播放，false = 暂停/停止
+  int64 position_ms = 6;   // 已播放位置（无进度信息时为 0）
+  int64 duration_ms = 7;   // 总时长（未知为 0）
+  float speed = 8;         // 播放倍速（1.0 正常）
+  int64 ts_ms = 9;         // 本状态产生时刻（对端据此丢弃迟到的旧状态）
+  // 手机当前媒体音量 0-100。带上它，电脑侧的音量 +/- 才有依据：
+  // 否则电脑只能记自己点过的值，用户在手机上调一次就永远对不上。
+  int32 volume = 10;
+}
+
+/// 控制指令（MEDIA_COMMAND 0x81 的 body；电脑 → 手机）
+message MediaCommand {
+  enum Action {
+    PLAY_PAUSE = 0;   // 切换播放/暂停（最常用，也是唯一"盲按也安全"的动作）
+    PLAY = 1;
+    PAUSE = 2;
+    NEXT = 3;
+    PREV = 4;
+    STOP = 5;
+    SEEK_FORWARD = 6;  // 快进 delta_ms
+    SEEK_BACKWARD = 7; // 快退 delta_ms
+    SET_VOLUME = 8;    // 设置媒体音量 volume（0-100）
+  }
+  Action action = 1;
+  int32 volume = 2;    // 仅 SET_VOLUME 使用
+  int64 delta_ms = 3;  // 仅 SEEK_* 使用
+}

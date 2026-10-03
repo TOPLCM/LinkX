@@ -1,0 +1,13 @@
+[package]
+name = "linkx-lan"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "LinkX 传输层：UDP 发现 / TCP 加密字节流 / BLE 传输抽象"
+
+[dependencies]
+debuglog.workspace = true
+linkx-protocol.workspace = true
+linkx-crypto.workspace = true
+thiserror.workspace = true

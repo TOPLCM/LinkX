@@ -1,0 +1,162 @@
+name: CI（5.4 K1）
+on: [push, pull_request]
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+          targets: x86_64-pc-windows-gnu, aarch64-linux-android
+      - name: 格式（fmt --check）
+        run: cargo fmt --all -- --check
+      - name: Lint（clippy -D warnings，全 workspace 含测试代码）
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Unit tests（核心 crate）
+        run: cargo test --workspace --exclude linkx-windows
+      # 注释卫生：源码里不许出现内部编号（公开仓库的读者没有那份台账），
+      # 注释占比与连续注释块也有上限。规则见脚本头部。
+      - name: 注释卫生（去内部编号 / 注释长度）
+        run: bash Scripts/check-comment-hygiene.sh
+      - name: 版本同步（D1，防"漏改某一处"）
+        run: bash Scripts/check-version-sync.sh
+      - name: 协议一致性（Y6）
+        run: bash Scripts/check-protocol-sync.sh
+      - name: 加密审计（Y4）
+        run: bash Scripts/check-crypto-audit.sh
+      - name: Compose/Kotlin 配对（K3）
+        run: bash Scripts/check-compose-kotlin-pair.sh
+      - name: buf lint（Y6，需 protoc）
+        run: |
+          bash <(curl -sSL https://github.com/bufbuild/buf/install.sh 'v1.32.1') --yes
+          buf lint Proto
+  windows-shell:
+    runs-on: ubuntu-latest
+    needs: core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+          targets: x86_64-pc-windows-gnu
+      - run: sudo apt-get update && sudo apt-get install -y mingw-w64
+      - name: 交叉编译 Windows 壳（Y1）
+        run: cargo build --release --target x86_64-pc-windows-gnu --manifest-path Platforms/Windows/Cargo.toml
+      # 交付构建零调试残留（D2）。之前这个脚本只在文档里写着"手工跑一次"，
+      # 等于没有门禁：release 里混进控制面不会有任何东西变红。
+      # 本 job 出的正是 `--release`（不带 agent-debug）的那个 exe，正好是它该查的产物。
+      - name: 交付构建零调试残留（D2）
+        run: bash Scripts/check-release-clean.sh Target/x86_64-pc-windows-gnu/release/linkx.exe
+  android:
+    runs-on: ubuntu-latest
+    needs: core
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust 工具链 + aarch64-linux-android（J5）
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+          targets: aarch64-linux-android
+      - name: cargo-ndk（把 Rust 核心打成安卓 .so）
+        run: cargo install cargo-ndk --version 4.1.2 --locked
+      - name: Android NDK r27c
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          add-to-path: false
+      # 关键：先产出 liblinkx_core.so，否则 NativeCore.loadLibrary 在运行时崩溃
+      - name: 构建 Rust Core .so（arm64-v8a）
+        run: bash Scripts/build-android-core.sh
+      - name: Gradle 8.7 + AGP（K1/J5）
+        uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 21 }
+      - uses: gradle/actions/setup-gradle@v3
+        with: { gradle-version: 8.7 }
+      - run: |
+          echo "sdk.dir=$ANDROID_HOME" > Platforms/Android/local.properties || true
+          (cd Platforms/Android && gradle -p . assembleDebug --no-daemon)
+      - name: 校验 APK 已打包 liblinkx_core.so
+        run: |
+          APK="$(find Platforms/Android -name '*.apk' | head -1)"
+          [ -n "$APK" ] || { echo "❌ 未找到 APK"; exit 1; }
+          unzip -l "$APK" | grep -q 'lib/arm64-v8a/liblinkx_core.so' \
+            || { echo "缺少 lib/arm64-v8a/liblinkx_core.so"; exit 1; }
+          echo "✅ APK 内含 liblinkx_core.so: $APK"
+      # 审计 M7：安卓交付物是唯一带 JNI 调试符号面的产物（nativeDebugdStart 等），
+      # 过去只有本地出包脚本记得跑这道检查——CI 上没有任何东西拦得住一次忘了关 DEBUGD 的发布。
+      - name: 交付构建零调试残留（APK 内 .so）
+        run: |
+          APK="$(find Platforms/Android -name '*.apk' | head -1)"
+          bash Scripts/check-release-clean.sh --apk-so "$APK"
+      - name: compose/kotlin pair（K3）
+        run: bash Scripts/check-compose-kotlin-pair.sh
+      - name: 版本同步（D1）
+        run: bash Scripts/check-version-sync.sh
+  # ── 平台差异门禁───────────────────────────────────────────
+  # 起因：`cargo test --workspace` 在 ubuntu 上全绿的基线，迁到 Windows 宿主后
+  # 暴露出两个只在 Windows 成立的缺陷（Winsock 对「缓冲小于数据报」返回
+  # WSAEMSGSIZE 并消费该包、而非 Linux 的静默截断；以及 FILETIME 的 SystemTime
+  # 只有 100ns 粒度）。现有 windows-shell job 只交叉编译、不执行测试，拦不住这类
+  # 语义差异，必须由真实 Windows runner 跑单测。
+  windows-host-tests:
+    runs-on: windows-latest
+    needs: core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+          targets: x86_64-pc-windows-gnu, aarch64-linux-android
+      - name: protoc 21.12（prost-build 不内置 protoc，缺则 build.rs panic；版本与本机一致）
+        run: |
+          Invoke-WebRequest -OutFile protoc.zip `
+            https://github.com/protocolbuffers/protobuf/releases/download/v21.12/protoc-21.12-win64.zip
+          Expand-Archive protoc.zip -DestinationPath "$PWD\protoc"
+          "PROTOC=$PWD\protoc\bin\protoc.exe" >> $env:GITHUB_ENV
+          & "$PWD\protoc\bin\protoc.exe" --version
+      # 不 --exclude linkx-windows：msvc 宿主上 16 项壳单测实测可跑，正是本次要拦的
+      # 那类平台语义（含 DPAPI / Winsock / 文件时间戳）所在地。
+      - name: 全量单测（含 Windows 壳）
+        run: cargo test --workspace
+  # ── JNI 门禁──────────────────────────────────────────────
+  # P1-01 的根因：host 全绿但 `-p linkx-ffi --features jni --tests` 编译不过，
+  # 默认 CI 从不带该 feature 构建，只能靠人肉在发版前发现（当初由决策登记）。
+  jni-gate:
+    runs-on: ubuntu-latest
+    needs: core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+      - name: protoc 21.12（显式安装，不依赖 runner 镜像自带）
+        run: |
+          curl -sSL -o /tmp/protoc.zip \
+            https://github.com/protocolbuffers/protobuf/releases/download/v21.12/protoc-21.12-linux-x86_64.zip
+          unzip -q /tmp/protoc.zip -d /tmp/protoc
+          echo "PROTOC=/tmp/protoc/bin/protoc" >> $GITHUB_ENV
+          /tmp/protoc/bin/protoc --version
+      - name: clippy --features jni --tests
+        run: cargo clippy -p linkx-ffi --features jni --tests -- -D warnings
+      - name: test --features jni
+        run: cargo test -p linkx-ffi --features jni
+  # ── 供应链门禁：依赖安全通告 ──────────────────────────────────────
+  # 起因：`rsa` 那条 RUSTSEC-2023-0071（Marvin）是人工读通告读出来的，仓库里没有任何东西
+  # 会在它出现时变红（口径见 Docs/Security.md）。这条 job 只把 Cargo.lock 交给 RustSec
+  # 通告库比对，不上传源码。**要放行某条必须把 RUSTSEC 号写进下面的参数并在 Docs/Security.md
+  # 留下书面决策**——空着 ignore 就是"这条通告我们认了"，不许静默忽略。
+  supply-chain:
+    runs-on: ubuntu-latest
+    needs: core
+    steps:
+      - uses: actions/checkout@v4
+      - name: cargo-audit 0.21.8
+        run: cargo install cargo-audit --version 0.21.8 --locked
+      - name: 主 workspace 依赖漏洞
+        run: cargo audit --file Cargo.lock --ignore RUSTSEC-2023-0071
+      # fuzz 用的是自己那份 lock（Tests/fuzz），不在主 workspace 的依赖图里，
+      # 只被 `cargo fuzz` 用到，交付产物里没有它的任何一个 crate —— 但它同样会拉到有漏洞的版本，
+      # 所以一并扫：红了就升级，不拦发布。
+      - name: fuzz 依赖漏洞
+        run: cargo audit --file Tests/fuzz/Cargo.lock --ignore RUSTSEC-2023-0071

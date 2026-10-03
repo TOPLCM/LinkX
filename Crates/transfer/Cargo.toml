@@ -1,0 +1,24 @@
+[package]
+name = "linkx-transfer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "LinkX 文件传输核心：256KB 分块 + 逐块 CRC32 + 整文件 SHA-256 + 断点续传 + 任务队列"
+
+[features]
+# 2026-09-30：原 `ls-interop`（LocalSend HTTP 互操作层）连同 vendored 核心一起删除——
+# 真实开发从未用到它（没有任何生产调用点），却把 hyper / reqwest / rustls / tokio
+# 整套异步栈挂在构建图上。将来若真要做互通，从 git 历史取回 `ls_interop.rs`，
+# 并先补上 TLS + 证书指纹绑定 + 逐次接收确认（旧文件头部写明了三件事）。
+# 留在生产路径里的只有它的**文件名规则移植版**（`src/filename.rs`，Apache-2.0，
+# 许可全文与出处见 `Licenses/localsend/`）。
+default = []
+
+[dependencies]
+debuglog.workspace = true
+linkx-protocol.workspace = true
+prost.workspace = true
+sha2.workspace = true
+crc32fast.workspace = true
+thiserror.workspace = true
