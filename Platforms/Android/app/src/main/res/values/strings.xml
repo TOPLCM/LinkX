@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">LinkX</string>
+    <string name="nls_label">LinkX 通知转发</string>
+    <string name="ble_fgs_channel_name">连接保活</string>
+    <string name="ble_fgs_title">LinkX 连接中</string>
+    <string name="ble_fgs_text">长按通知展开发送剪贴板</string>
+    <string name="msg_copied">已复制到本机剪贴板</string>
+    <string name="clip_send_action">发送剪贴板</string>
+    <string name="clip_send_sent">已发送到电脑</string>
+    <string name="clip_send_already">这条已经发过了</string>
+    <string name="clip_send_empty">剪贴板是空的</string>
+    <string name="clip_send_not_paired">还没连上电脑</string>
+    <string name="clip_send_disabled">剪贴板同步已关闭</string>
+    <string name="clip_send_failed">发送失败</string>
+</resources>

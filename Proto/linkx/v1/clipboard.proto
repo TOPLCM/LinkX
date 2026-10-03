@@ -1,0 +1,16 @@
+// 剪贴板共享，CLIPBOARD_PUSH 0x20 的 body
+syntax = "proto3";
+package linkx.v1;
+
+message ClipboardPush {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    KIND_TEXT = 1;
+    KIND_IMAGE = 2;
+    KIND_FILE_PATH = 3;
+  }
+  Kind kind = 1;
+  bytes data = 2;        // TEXT: utf8 字节；IMAGE: 编码后位图；FILE_PATH: 不传输
+  string mime = 3;
+  int64 ts_ms = 4;
+}

@@ -1,0 +1,9 @@
+// 心跳（HEARTBEAT 0x70）
+// PING/PONG 语义复用同一 type，用 TLV payload 区分（tag 见 tlv.rs）；
+// 本 proto 仅用于 debug/JSON 模式与未来扩展。
+syntax = "proto3";
+package linkx.v1;
+
+message Heartbeat {
+  int64 ts_ms = 1;
+}

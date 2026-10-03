@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider 可见范围：只开放应用外部私有目录（收到的文件就在这里），
+     不暴露应用私有数据、也不暴露外部存储上的其它内容。 -->
+<paths>
+    <external-files-path name="linkx_files" path="." />
+</paths>

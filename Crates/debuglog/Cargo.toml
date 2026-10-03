@@ -1,0 +1,14 @@
+[package]
+name = "debuglog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "LinkX 双端 Debug 模式：全栈运行状态/错误日志（NDJSON + 可读文本 + 环形现场 + 滚动 + 导出；0.3.0 决策 M/D/H）"
+
+[lib]
+name = "debuglog"
+path = "src/lib.rs"
+
+[dependencies]
+# 无第三方依赖：JSON 转义自实现，避免 panic=abort 下的 unwrap 崩溃面

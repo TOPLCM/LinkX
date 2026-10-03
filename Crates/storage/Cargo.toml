@@ -1,0 +1,12 @@
+[package]
+name = "linkx-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "LinkX 本地存储：SQLite（4.7 / ADR-022，schema 单一源）"
+
+[dependencies]
+debuglog.workspace = true
+rusqlite.workspace = true
+thiserror.workspace = true

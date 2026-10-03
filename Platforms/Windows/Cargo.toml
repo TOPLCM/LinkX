@@ -1,0 +1,76 @@
+[package]
+name = "linkx-windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "LinkX Windows 自绘壳：纯 Win32 + GDI 自绘（无 WPF/.NET/WebView）"
+
+[[bin]]
+name = "linkx"
+path = "src/main.rs"
+
+[dependencies]
+linkx-protocol.workspace = true
+# 依赖名 linkx-ffi，库名 linkx_core（两端共用的 FFI 边界；这里只取版本常量做页脚）
+linkx-ffi.workspace = true
+linkx-lan.workspace = true
+# 双端链路接线：Windows 壳直调会话引擎 + 身份/指纹派生 + 身份私钥随机生成
+linkx-session.workspace = true
+linkx-crypto.workspace = true
+# 文件传输：分块/CRC32/SHA-256 + 发送/接收任务状态机（落盘由本壳完成）
+linkx-transfer.workspace = true
+# 双端 Debug 模式：全栈结构化日志 + 导出（见 Docs/Debug-Plane.md）
+debuglog.workspace = true
+# 调试控制面。**仅 agent-debug 时编译**——交付构建（MSI）不带该 feature，
+# 控制面与其 serde_json 依赖完全不进产物，可用符号表验证。
+linkx-debugd = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+rand.workspace = true
+
+# windows-rs：Win32 + GDI 自绘 + BLE Central（WinRT）
+[target.'cfg(windows)'.dependencies]
+windows-core = "0.58.0"
+windows = { version = "0.58.0", features = [
+    "Devices_Bluetooth",
+    "Devices_Bluetooth_Advertisement",
+    "Devices_Bluetooth_GenericAttributeProfile",
+    "Devices_Enumeration",
+    "Foundation",
+    "Foundation_Collections",
+    "Storage_Streams",
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    # 0.4.2 相册：JPEG 缩略图解码走系统 WIC（WindowsCodecs.dll，本进程已加载）
+    "Win32_Graphics_Imaging",
+    "Win32_Security",
+    "Win32_Security_Cryptography",
+    "Win32_System_Com",
+    # 预览态用 WIC 编码器在内存里造纯色 JPEG（不落盘）
+    "Win32_System_Com_StructuredStorage",
+    # 单张拖出：SHDoDragDrop 的 DROPEFFECT / IDataObject 在这一模块
+    "Win32_System_Ole",
+    "Win32_System_DataExchange",
+    "Win32_System_IO",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Pipes",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_Storage_FileSystem",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    # 单张拖出：ILCreateFromPathW + SHCreateDataObject 在 Shell.Common（返回的 IDataObject 由 shell 实现）
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+    # 0.5.0 F54b：相册拖出改拉模型要自己实现 IDataObject/IStream（windows-implement 的接口表）
+    "implement",
+] }
+
+[features]
+# 本机回环调试控制面。**刻意不在 default 里**，且 `Scripts/build-mingw-windows.sh`
+# （交付路径）不得启用；调试变体用 `--features agent-debug` 单独出包。
+agent-debug = ["dep:linkx-debugd", "dep:serde_json"]

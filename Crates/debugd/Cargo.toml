@@ -1,0 +1,18 @@
+[package]
+name = "linkx-debugd"
+description = "本机回环调试控制面：/state + /logs + /debug + 计数器，供开发与自动化调试驱动双端"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# 本 crate 刻意**不带**任何 feature 开关：门禁放在宿主侧的 optional dependency 上。
+# 交付构建（MSI / release APK）不启用 `agent-debug`，则本 crate 连同其依赖根本不参与
+# 编译 —— 比 crate 内部塞 no-op 桩更强：产物里不留符号、不留端口，且可用 nm 验证。
+#
+# 依赖面刻意只用 std + serde_json（二者均已在 workspace 依赖树内）：
+# 不引入任何 HTTP/异步框架，避免为一个调试接口扩大供应链与 Y4 加密审计面。
+
+[dependencies]
+debuglog.workspace = true
+serde_json.workspace = true
