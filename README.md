@@ -29,7 +29,7 @@
 
 ## 下载
 
-[Releases](releases) 页面取安装包，校验值见 [`CHANGELOG.md`](CHANGELOG.md)。
+[Releases](releases) 页面取安装包，校验值见 [`Release/README.md`](Release/README.md)。
 
 | 平台 | 要求 | 体积 |
 |---|---|---|
