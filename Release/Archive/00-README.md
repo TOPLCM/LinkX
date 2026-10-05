@@ -2,7 +2,7 @@
 
 本目录存放**已退役版本**的交付登记。布局对每个版本都一样：
 
-```
+```text
 Archive/
   v<版本>/
     Windows/LinkX-<版本>-x64.msi.sha256

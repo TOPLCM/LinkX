@@ -5,7 +5,7 @@
 `.gitignore` 排除了 `Release/Windows/*`、`Release/Android/*`、`Release/Debug/*`
 与 `Release/Archive/**/LinkX-*.{msi,apk,idsig}`。
 
-```
+```text
 Release/                          （除 Archive 里的 .sha256 之外，下面都是本机产物、不入库）
   Windows/LinkX-<版本>-x64.msi              当前版本：电脑端安装包（+ .sha256）
   Android/LinkX-<版本>-release.apk          当前版本：手机端交付 APK（+ .sha256）
