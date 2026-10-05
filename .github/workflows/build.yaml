@@ -38,9 +38,11 @@ jobs:
         run: bash Scripts/check-crypto-audit.sh
       - name: Compose/Kotlin 版本配对
         run: bash Scripts/check-compose-kotlin-pair.sh
-      - name: buf lint（需 protoc）
+      - name: 协议风格检查（buf）
         run: |
-          bash <(curl -sSL https://github.com/bufbuild/buf/install.sh 'v1.32.1') --yes
+          curl -sSLo /usr/local/bin/buf             https://github.com/bufbuild/buf/releases/download/v1.32.1/buf-Linux-x86_64
+          chmod +x /usr/local/bin/buf
+          buf --version
           buf lint Proto
   windows-shell:
     runs-on: ubuntu-latest
