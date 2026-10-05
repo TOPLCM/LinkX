@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use crate::settings::{self, Theme};
+use crate::settings::{self, CloseBehavior, Theme};
 
 /// 设备条目"还活着"的有效期：超过这个时间没再收到广播就摘掉（低延迟广播几十毫秒一次，
 /// 12 s 足够容忍偶发丢包）。必须有 TTL：广播用的是**随机可解析地址（RPA）**，手机重启或周期性
@@ -476,6 +476,72 @@ pub(crate) struct IdentityChangeView {
     pub new_fp: String,
 }
 
+/// 询问弹窗上按下的是哪个按钮：鼠标点、回车、Esc 三个入口都归到这三选一
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CloseChoice {
+    Minimize,
+    Exit,
+    Cancel,
+}
+
+/// 关闭按钮该做出的动作
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CloseAction {
+    /// 弹询问窗
+    Ask,
+    /// 收进托盘：隐藏窗口，进程与托盘图标都留着
+    Minimize,
+    /// 走既有的退出收尾
+    Exit,
+    /// 什么都不做
+    Stay,
+}
+
+/// 一次关闭操作的结果：动作 + 要不要把这次选择记进设置
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CloseDecision {
+    pub(crate) action: CloseAction,
+    /// `None` = 设置一个字不动
+    pub(crate) persist: Option<CloseBehavior>,
+}
+
+/// 关闭行为的唯一决策口：`choice = None` 是"刚点了关闭按钮"，`Some` 是"弹窗上有了回答"。
+/// 勾了"记住"也只在这一次真的选了一边时才写设置 —— 取消时没有任何值得记住的选择
+pub(crate) fn decide_close(
+    behavior: CloseBehavior,
+    remember: bool,
+    choice: Option<CloseChoice>,
+) -> CloseDecision {
+    let Some(made) = choice else {
+        return CloseDecision {
+            action: match behavior {
+                CloseBehavior::Ask => CloseAction::Ask,
+                CloseBehavior::Minimize => CloseAction::Minimize,
+                CloseBehavior::Exit => CloseAction::Exit,
+            },
+            persist: None,
+        };
+    };
+    match made {
+        CloseChoice::Cancel => CloseDecision {
+            action: CloseAction::Stay,
+            persist: None,
+        },
+        c => CloseDecision {
+            action: match c {
+                CloseChoice::Minimize => CloseAction::Minimize,
+                CloseChoice::Exit => CloseAction::Exit,
+                CloseChoice::Cancel => CloseAction::Stay,
+            },
+            persist: remember.then_some(match c {
+                CloseChoice::Minimize => CloseBehavior::Minimize,
+                CloseChoice::Exit => CloseBehavior::Exit,
+                CloseChoice::Cancel => CloseBehavior::Ask,
+            }),
+        },
+    }
+}
+
 /// UI 与 worker 共享状态（单实例，`Arc<Mutex<..>>`）
 #[derive(Debug)]
 pub(crate) struct UiState {
@@ -539,6 +605,16 @@ pub(crate) struct UiState {
     pub restart_req: bool,
     pub toast_show_content: bool,
     pub theme: Theme,
+    /// 开机自启动：**注册表里那条启动项的实际状态**（进设置页时回读，`settings.ini` 只是上一次记忆）
+    pub autostart: bool,
+    /// 启动项内容是否就是本机现在该写的那一份；被外部改过时开关旁要说实话而不是"已开启"
+    pub autostart_is_ours: bool,
+    /// 点关闭按钮时做什么
+    pub close_behavior: CloseBehavior,
+    /// 「最小化到托盘还是退出程序」询问弹窗是否开着（模态：盖住背后的一切点击）
+    pub close_prompt: bool,
+    /// 询问弹窗里「记住我的选择，不再询问」的勾选
+    pub close_remember: bool,
     pub errors: Vec<ErrorRow>,
     pub pending_toasts: Vec<(String, String)>,
     /// 界面可见状态的**变化序号**：worker 每轮末尾比对，变了才 `post_state_changed`。
@@ -649,6 +725,11 @@ impl Default for UiState {
             restart_req: false,
             toast_show_content: true,
             theme: Theme::default(),
+            autostart: false,
+            autostart_is_ours: true,
+            close_behavior: CloseBehavior::default(),
+            close_prompt: false,
+            close_remember: false,
             errors: Vec::new(),
             pending_toasts: Vec::new(),
             ui_rev: 0,
@@ -981,6 +1062,10 @@ fn load_into(mut st: UiState) -> UiState {
     st.auto_connect = s.auto_connect;
     st.theme = s.theme;
     st.debug_enabled = s.debug_enabled;
+    st.close_behavior = s.close_behavior;
+    // 开机自启动先按 ini 那份记忆摆出来，进设置页时再由 `autostart::observe()` 用注册表真值覆盖
+    st.autostart = s.autostart;
+    st.autostart_is_ours = s.autostart;
     crate::features::load_wanted(&mut st, &s);
     // **就在下一行**把"想要的状态"固化成"本次加载的状态"：必须早于 worker 启动
     // 与任何模块初始化，否则会出现"设置说关了、模块照样起来"
@@ -1451,6 +1536,46 @@ mod tests {
         });
         st.identity_change = None;
         assert!(st.identity_change.is_none());
+    }
+
+    /// 关闭行为的三条入口（点 X、弹窗按钮、回车/Esc）都走这一个决策口：分成两处判，
+    /// "勾了记住但按了取消"这类组合迟早各说各话
+    #[test]
+    fn deciding_close_without_a_choice_follows_the_saved_behavior() {
+        for (b, want) in [
+            (CloseBehavior::Ask, CloseAction::Ask),
+            (CloseBehavior::Minimize, CloseAction::Minimize),
+            (CloseBehavior::Exit, CloseAction::Exit),
+        ] {
+            let d = decide_close(b, false, None);
+            assert_eq!((d.action, d.persist), (want, None), "{b:?} 时不该动设置");
+            // 已经记住过行为的用户，勾没勾"记住"都不该再被打扰
+            assert_eq!(decide_close(b, true, None).action, want);
+        }
+    }
+
+    #[test]
+    fn remembering_only_persists_a_real_choice() {
+        let d = decide_close(CloseBehavior::Ask, true, Some(CloseChoice::Minimize));
+        assert_eq!(
+            (d.action, d.persist),
+            (CloseAction::Minimize, Some(CloseBehavior::Minimize))
+        );
+        let d = decide_close(CloseBehavior::Ask, true, Some(CloseChoice::Exit));
+        assert_eq!(
+            (d.action, d.persist),
+            (CloseAction::Exit, Some(CloseBehavior::Exit))
+        );
+        // 没勾"记住"就只执行这一次，设置一个字都不改
+        for c in [CloseChoice::Minimize, CloseChoice::Exit] {
+            assert_eq!(
+                decide_close(CloseBehavior::Ask, false, Some(c)).persist,
+                None
+            );
+        }
+        // 取消时没有任何值得记住的选择：勾了也不许把行为写成别的值
+        let d = decide_close(CloseBehavior::Ask, true, Some(CloseChoice::Cancel));
+        assert_eq!((d.action, d.persist), (CloseAction::Stay, None));
     }
 
     #[test]

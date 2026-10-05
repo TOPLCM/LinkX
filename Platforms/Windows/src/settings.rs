@@ -33,6 +33,50 @@ impl Theme {
     }
 }
 
+/// 点标题栏关闭按钮时做什么（默认先问一句）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum CloseBehavior {
+    #[default]
+    Ask,
+    Minimize,
+    Exit,
+}
+
+impl CloseBehavior {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            CloseBehavior::Ask => "询问",
+            CloseBehavior::Minimize => "最小化到托盘",
+            CloseBehavior::Exit => "退出程序",
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            CloseBehavior::Ask => "ask",
+            CloseBehavior::Minimize => "minimize",
+            CloseBehavior::Exit => "exit",
+        }
+    }
+
+    fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "minimize" => CloseBehavior::Minimize,
+            "exit" => CloseBehavior::Exit,
+            _ => CloseBehavior::Ask,
+        }
+    }
+
+    /// 设置页那一行点击后往哪个值走：显示与切换必须同源于这张表
+    pub(crate) fn next(self) -> Self {
+        match self {
+            CloseBehavior::Ask => CloseBehavior::Minimize,
+            CloseBehavior::Minimize => CloseBehavior::Exit,
+            CloseBehavior::Exit => CloseBehavior::Ask,
+        }
+    }
+}
+
 /// 可持久化的用户设置
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Settings {
@@ -59,6 +103,10 @@ pub(crate) struct Settings {
     pub inbox: String,
     /// 自动连接已绑定设备（默认开；关 = 必须人点一次设备才连）
     pub auto_connect: bool,
+    /// 开机自启动：`settings.ini` 里这份只是记忆，真值在注册表，进设置页时回读并同步到这里
+    pub autostart: bool,
+    /// 关闭按钮行为
+    pub close_behavior: CloseBehavior,
 }
 
 impl Default for Settings {
@@ -77,6 +125,9 @@ impl Default for Settings {
             feat_album: true,
             inbox: String::new(),
             auto_connect: true,
+            // 开机自启动默认关：往注册表 Run 键写东西必须是用户明确要的
+            autostart: false,
+            close_behavior: CloseBehavior::default(),
         }
     }
 }
@@ -97,6 +148,8 @@ impl Settings {
             feat_album: st.feat_album,
             inbox: st.inbox_dir.clone(),
             auto_connect: st.auto_connect,
+            autostart: st.autostart,
+            close_behavior: st.close_behavior,
         }
     }
 
@@ -120,6 +173,8 @@ feat_media={}
 feat_album={}
 inbox={}
 auto_connect={}
+autostart={}
+close_behavior={}
 ",
             self.toast_enabled as u8,
             self.toast_show_content as u8,
@@ -135,6 +190,8 @@ auto_connect={}
             // 收件目录是唯一自由文本，所以在写的时候剥掉 CR/LF
             self.inbox.replace(['\r', '\n'], ""),
             self.auto_connect as u8,
+            self.autostart as u8,
+            self.close_behavior.as_str(),
         );
         // 先写临时文件、再改名覆盖：`fs::write` 是"截断后重写"，进程在中间被杀就留下一份半截
         // ini，而读取端把"缺键"一律回落默认值 —— 于是隐私相关的开关（剪贴板同步、通知里显示
@@ -180,8 +237,63 @@ pub(crate) fn load() -> Settings {
             "feat_album" => s.feat_album = on(v),
             "inbox" => s.inbox = v.to_string(),
             "auto_connect" => s.auto_connect = on(v),
+            "autostart" => s.autostart = on(v),
+            "close_behavior" => s.close_behavior = CloseBehavior::parse(v),
             _ => {}
         }
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn close_behavior_values_round_trip_and_garbage_falls_back_to_ask() {
+        for b in [
+            CloseBehavior::Ask,
+            CloseBehavior::Minimize,
+            CloseBehavior::Exit,
+        ] {
+            assert_eq!(CloseBehavior::parse(b.as_str()), b);
+        }
+        assert_eq!(CloseBehavior::parse("MINIMIZE"), CloseBehavior::Minimize);
+        for junk in ["", " ", "tray", "0", "最小化"] {
+            assert_eq!(
+                CloseBehavior::parse(junk),
+                CloseBehavior::Ask,
+                "{junk:?} 不该被认成别的值"
+            );
+        }
+        assert_eq!(CloseBehavior::default(), CloseBehavior::Ask);
+    }
+
+    #[test]
+    fn close_behavior_cycle_covers_all_three_values_once() {
+        let mut seen = vec![CloseBehavior::Ask];
+        let mut cur = CloseBehavior::Ask;
+        for _ in 0..3 {
+            cur = cur.next();
+            seen.push(cur);
+        }
+        assert_eq!(
+            seen,
+            vec![
+                CloseBehavior::Ask,
+                CloseBehavior::Minimize,
+                CloseBehavior::Exit,
+                CloseBehavior::Ask
+            ],
+            "点一下只该走一格，且三格一圈回到询问"
+        );
+    }
+
+    /// 界面上那颗循环按钮显示的就是 `label()`：文案与取值表同源，改一个字不会只改到一半
+    #[test]
+    fn close_behavior_labels_are_the_three_named_choices() {
+        assert_eq!(CloseBehavior::Ask.label(), "询问");
+        assert_eq!(CloseBehavior::Minimize.label(), "最小化到托盘");
+        assert_eq!(CloseBehavior::Exit.label(), "退出程序");
+    }
 }

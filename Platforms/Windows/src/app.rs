@@ -666,11 +666,11 @@ impl Worker {
                         ))
                     }
                     "restart" => {
-                        // 与「重新启动」按钮同一条路径：置命令位 → 正常关窗 → `main` 收尾后拉起新实例
+                        // 与「重新启动」按钮同一条路径：置命令位 → 退出收尾 → `main` 拉起新实例
                         st.restart_req = true;
                         let hwnd_raw = st.hwnd_raw;
                         drop(st);
-                        crate::window::request_close_from_raw(hwnd_raw);
+                        crate::window::request_exit_from_raw(hwnd_raw);
                         Ok("已按重启流程退出并拉起新实例".to_string())
                     }
                     other => Err(format!("未知动作 {other}")),

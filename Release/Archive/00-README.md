@@ -44,8 +44,10 @@ Archive/
 | 0.4.4 | Android | `LinkX-0.4.4-release.apk` | 2,424,038 | `d99561dfbdf726e9808346cf9a393b6bf77d3117d3bd3e6c33858bd626ed5ab2` |
 | 0.4.5 | Windows | `LinkX-0.4.5-x64.msi` | 630,784 | `567ac6775dcdf4caef1e1e9222fda2dd7a6b5ebad9118bc359d5ac12307226af` |
 | 0.4.5 | Android | `LinkX-0.4.5-release.apk` | 2,428,134 | `26462226f016ab9ff73acf9c1e81b20417e58338a4bc4e0aa747c0d0da056275` |
+| 0.5.0 | Windows | `LinkX-0.5.0-x64.msi` | 626,688 | `cb9bebdc02f67719c4ce424f250d89e8749301de0b2252abb5237632979e8875` |
+| 0.5.0 | Android | `LinkX-0.5.0-release.apk` | 2,407,710 | `16383f369fa61adfd2e3e508034047d1bf94e50bc742860176c64227acf1e56b` |
 
 ## 当前版本
 
-0.5.0 的产物与校验值见 [`../README.md`](../README.md)；逐版改了什么见
+0.5.1 的产物与校验值见 [`../README.md`](../README.md)；逐版改了什么见
 [`../../CHANGELOG.md`](../../CHANGELOG.md)。

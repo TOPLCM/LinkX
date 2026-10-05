@@ -41,3 +41,6 @@ Release/Archive/**/LinkX-*.apk
 Release/Archive/**/LinkX-*.idsig
 
 .zcode/
+
+# 导出公开副本时留在副本里的时间戳（本机状态，不是仓库内容）
+.export-public.stamp

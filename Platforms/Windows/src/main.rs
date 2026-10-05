@@ -11,6 +11,8 @@ mod about;
 #[cfg(windows)]
 mod app;
 #[cfg(windows)]
+mod autostart;
+#[cfg(windows)]
 mod ble_central;
 #[cfg(windows)]
 mod clipboard;
@@ -69,12 +71,21 @@ fn main() {
     window::enable_dpi_awareness();
 
     // 命令行里的文件路径（`linkx.exe D:.pdf`、右键"发送到"、拖到 exe 上）。用 `args_os` 而非 `args`：路径可能不是合法 UTF-8，`args()` 会 panic
-    let file_arg = std::env::args_os()
-        .skip(1)
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let file_arg = args
+        .iter()
         .map(std::path::PathBuf::from)
         .find(|p| p.is_file());
+    // 开机自启动拉起的那一次只进托盘、不弹主窗口。参数名与写进注册表的那一份同源于 `autostart`，
+    // 不在两处各抄一遍字符串
+    let start_hidden = autostart::has_minimized_arg(
+        &args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect::<Vec<String>>(),
+    );
 
-    // 单实例：已有实例在跑 → 把路径经命名管道转交过去，本进程立即退出
+    // 单实例：已有实例在跑 → 把请求经命名管道转交过去，本进程立即退出
     if !ipc::acquire_single_instance() {
         match file_arg {
             Some(p) => {
@@ -85,7 +96,16 @@ fn main() {
                     say("[LinkX] 运行中的实例未响应管道，路径未转交");
                 }
             }
-            None => say("[LinkX] 已有实例在运行，本进程退出"),
+            // 没有文件参数 = 用户又双击了一次图标。运行中的实例可能藏在托盘里（开机自启动拉起的那一次、
+            // 或上次选了「最小化到托盘」），不出声地退出会让用户以为双击没反应，所以请它把窗口摆回来。
+            // 带 `--minimized` 的这一次本身就要求不显示，不去打扰
+            None => {
+                if start_hidden || ipc::request_show() {
+                    say("[LinkX] 已有实例在运行，本进程退出");
+                } else {
+                    say("[LinkX] 已有实例在运行，但未能通知它，本进程退出");
+                }
+            }
         }
         return;
     }
@@ -99,13 +119,17 @@ fn main() {
     let preview = state::preview_shared();
     let shared = preview.clone().unwrap_or_else(state::new_shared);
     let theme_pref = shared.lock().unwrap().theme;
-    let hwnd = match window::create_main_window(hinst, APP_TITLE, 960, 660, theme_pref) {
-        Some(h) => h,
-        None => {
-            say("[LinkX] 创建主窗口失败");
-            return;
-        }
-    };
+    let hwnd =
+        match window::create_main_window(hinst, APP_TITLE, 960, 660, theme_pref, !start_hidden) {
+            Some(h) => h,
+            None => {
+                say("[LinkX] 创建主窗口失败");
+                return;
+            }
+        };
+    if start_hidden {
+        say("[LinkX] 按开机自启动方式拉起：主窗口不显示，托盘图标照常可用");
+    }
 
     {
         let mut st = shared.lock().unwrap();

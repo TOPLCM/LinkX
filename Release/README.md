@@ -24,16 +24,18 @@ Release/                          （除 Archive 里的 .sha256 之外，下面�
    所有版本都用同一套分层。
 3. **调试构建（`*-debug.apk`）不归档、不分发**，移到 `Release/Debug/`。
 
-## 当前版本 0.5.0 的校验值
+## 当前版本 0.5.1 的校验值
 
 本表是当前发布产物的校验值；早于本表的任何登记都不再适用。
-从 Releases 页面下载后与下表比对；最后一行是调试构建，不交付，只登记校验值。
+从 Releases 页面下载后与下表比对。
 
 | 平台 | 文件 | 大小 (bytes) | SHA-256 |
 |---|---|---|---|
-| Windows | `LinkX-0.5.0-x64.msi` | 626,688 | `cb9bebdc02f67719c4ce424f250d89e8749301de0b2252abb5237632979e8875` |
-| Android | `LinkX-0.5.0-release.apk` | 2,407,710 | `16383f369fa61adfd2e3e508034047d1bf94e50bc742860176c64227acf1e56b` |
-| Android | `LinkX-0.5.0-debug.apk`（调试用，不交付） | 10,013,284 | `7e769f06024f22a6651ab6f2df32f5b2ed18c7795f64cd93be257527c5e9ef92` |
+| Windows | `LinkX-0.5.1-x64.msi` | 630,784 | `62380562aa99c3ec764bb820beaa5a433da97e5d733736bddd3ba45a4c1e02cb` |
+| Android | `LinkX-0.5.1-release.apk` | 2,407,710 | `92d3b6bcdee182ae205f8d9825e333c0eb3e92a49f164453ea94b1c78b6e2be8` |
+
+这一版手机端没有功能改动（只是版本号与前向兼容的 `versionCode` 一起前进），
+因此不另出调试包；需要调试面时按 `Scripts/build-android-apk.sh` 的默认（debug）方式自己构建。
 
 MSI 的哈希每次重打包都会变（WiX 把打包时间写进产物），它核对的是同一份文件，不是同一份代码；
 APK 在同样输入下可复现。APK 用测试密钥签名，正式分发需自行重签，重签后哈希会变。

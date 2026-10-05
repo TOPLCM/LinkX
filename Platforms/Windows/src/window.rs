@@ -19,7 +19,7 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetCapture, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_BACK,
-    VK_RETURN,
+    VK_ESCAPE, VK_RETURN,
 };
 use windows::Win32::UI::Shell::{
     DragAcceptFiles, DragFinish, DragQueryFileW, ILCreateFromPathW, ILFree, SHCreateDataObject,
@@ -28,18 +28,20 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, IsIconic, LoadCursorW, LoadIconW, PostMessageW,
     PostQuitMessage, RegisterClassW, SetCursor, SetForegroundWindow, ShowWindow, CS_HREDRAW,
-    CS_VREDRAW, HICON, IDC_ARROW, IDC_HAND, IDI_APPLICATION, MINMAXINFO, SHOW_WINDOW_CMD,
-    SW_RESTORE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLIPBOARDUPDATE, WM_CLOSE, WM_DESTROY,
-    WM_DPICHANGED, WM_DROPFILES, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_LBUTTONDBLCLK,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_SETTINGCHANGE, WM_SIZE,
-    WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+    CS_VREDRAW, HICON, IDC_ARROW, IDC_HAND, IDI_APPLICATION, MINMAXINFO, SHOW_WINDOW_CMD, SW_HIDE,
+    SW_RESTORE, SW_SHOW, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLIPBOARDUPDATE, WM_CLOSE,
+    WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT,
+    WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER, WNDCLASSW,
+    WS_OVERLAPPEDWINDOW,
 };
 
+use crate::autostart;
 use crate::render::{self, HitTarget};
 use crate::settings;
 use crate::state::{
-    ReplyRequest, ReplyTarget, SharedState, UiState, FOCUS_MANUAL_IP, FOCUS_NONE, FOCUS_REPLY,
-    FOCUS_SEND_PATH, MAX_INPUT_CHARS,
+    decide_close, CloseAction, CloseChoice, ReplyRequest, ReplyTarget, SharedState, UiState,
+    FOCUS_MANUAL_IP, FOCUS_NONE, FOCUS_REPLY, FOCUS_SEND_PATH, MAX_INPUT_CHARS,
 };
 use crate::theme;
 
@@ -68,6 +70,7 @@ const _: () = {
     assert!(WM_CHAR != WM_KEYDOWN, "WM_CHAR 与 WM_KEYDOWN 不得混用");
     assert!(WM_KEYDOWN == 0x0100);
     assert!(VK_BACK.0 == 0x08);
+    assert!(VK_ESCAPE.0 == 0x1B, "Esc 的虚拟键码写错就关不掉询问弹窗");
     // 相册拖出：按下/抬起/移动靠这两个值判定，写错就是"点一下就拖走"或"拖不动也选不中"，且不会报错
     assert!(WM_LBUTTONUP == 0x0202);
     assert!(WM_LBUTTONDOWN == 0x0201);
@@ -86,6 +89,12 @@ const MK_LBUTTON: usize = 0x0001;
 
 /// worker 线程通过它通知 UI 重绘（与托盘回调 WM_APP+1 错开）
 pub(crate) const WM_APP_STATE_CHANGED: u32 = WM_APP + 2;
+/// 「别再问了，直接退出」：关闭询问弹窗里选了退出、或功能改动要重启时走这条。
+/// 它绕开 `WM_CLOSE` 的行为分派，但仍然交给 `DefWindowProc` 收尾 —— 直接 `process::exit`
+/// 会在托盘上留一个死图标
+pub(crate) const WM_APP_EXIT: u32 = WM_APP + 3;
+/// 「把窗口摆回前台」：第二实例（用户又双击了一次图标）与外部把文件转交进来时用
+pub(crate) const WM_APP_SHOW: u32 = WM_APP + 4;
 
 /// exe 内嵌应用图标的资源 id（由 `build.rs` 用 windres 编入 `linkx.rc` 的 id 1）
 const IDI_APP_ICON: u32 = 1;
@@ -144,32 +153,59 @@ pub(crate) fn post_state_changed(hwnd_raw: isize) {
     }
 }
 
-/// 正常关窗：`WM_CLOSE` → `DefWindowProc` → `WM_DESTROY` → `PostQuitMessage`，与点标题栏 ✕
-/// 同一条路径，`main` 的收尾（摘托盘、释放双缓冲、销毁窗口）一样都不会少 ——
-/// 直接 `process::exit` 会在托盘上留一个死图标
-pub(crate) fn request_close(hwnd: HWND) {
+/// 退出：`WM_APP_EXIT` → `DefWindowProc(WM_CLOSE)` → `WM_DESTROY` → `PostQuitMessage`，
+/// 与点标题栏 ✕ 后答"退出程序"走到的是同一个终点，`main` 的收尾（摘托盘、释放双缓冲、
+/// 销毁窗口）一样都不会少 —— 直接 `process::exit` 会在托盘上留一个死图标。
+/// 走私有消息而不是 `WM_CLOSE`：`WM_CLOSE` 现在归"关闭按钮行为"分派，重启这种"已经答过了"
+/// 的关窗如果再被拦一次，用户按了「重新启动」却什么也不会发生。
+pub(crate) fn request_exit(hwnd: HWND) {
     if hwnd.0.is_null() {
         return;
     }
     unsafe {
-        let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
+        let _ = PostMessageW(hwnd, WM_APP_EXIT, WPARAM(0), LPARAM(0));
     }
 }
 
-/// 供非 UI 线程（调试控制面）请求关窗：跨线程只传 `isize`，不在别的线程上持有 `HWND`
+/// 供非 UI 线程（调试控制面）请求退出：跨线程只传 `isize`，不在别的线程上持有 `HWND`
 #[allow(dead_code)] // 唯一调用方在 agent-debug 控制面，交付构建不带该 feature
-pub(crate) fn request_close_from_raw(hwnd_raw: isize) {
-    request_close(HWND(hwnd_raw as *mut c_void));
+pub(crate) fn request_exit_from_raw(hwnd_raw: isize) {
+    request_exit(HWND(hwnd_raw as *mut c_void));
+}
+
+/// 请求把窗口摆回前台。管道线程（第二实例双击图标、或「发送到 LinkX」）只传 `isize`，
+/// 不在别的线程上持有 `HWND`
+pub(crate) fn request_show_from_raw(hwnd_raw: isize) {
+    let hwnd = HWND(hwnd_raw as *mut c_void);
+    if hwnd.0.is_null() {
+        return;
+    }
+    unsafe {
+        let _ = PostMessageW(hwnd, WM_APP_SHOW, WPARAM(0), LPARAM(0));
+    }
+}
+
+/// 收进托盘：只藏窗口。进程、托盘图标、定时器与 worker 线程都原地不动，之后由托盘图标
+/// 那一下、或再双击一次程序图标（走 `ipc` 的唤醒请求）把窗口摆回来
+pub(crate) fn hide_to_tray(hwnd: HWND) {
+    if hwnd.0.is_null() {
+        return;
+    }
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_HIDE);
+    }
 }
 
 /// 创建主窗口。入参是**逻辑尺寸**（96dpi 基准），按系统 DPI 换算成物理像素。
-/// 标题栏必须在 `ShowWindow` **之前**染好色，否则会闪一帧系统默认的白条
+/// 标题栏必须在 `ShowWindow` **之前**染好色，否则会闪一帧系统默认的白条。
+/// `show = false` 用于 `--minimized` 拉起的那一次：窗口不显示，托盘图标与消息泵照旧
 pub(crate) fn create_main_window(
     hinst: HINSTANCE,
     title: &str,
     w: i32,
     h: i32,
     pref: settings::Theme,
+    show: bool,
 ) -> Option<HWND> {
     let class = windows::core::w!("LinkXShellWnd");
     let wc = WNDCLASSW {
@@ -227,7 +263,9 @@ pub(crate) fn create_main_window(
         // 拖进窗口的文件 = 待发送路径（与「选择…」同一出口）。这个绑定没有返回值，注册失败无从得知
         // —— 拖放这条入口验收时要真拖一次，不能只看编译过
         DragAcceptFiles(hwnd, true);
-        let _ = ShowWindow(hwnd, SHOW_WINDOW_CMD(5)); // SW_SHOW
+        if show {
+            let _ = ShowWindow(hwnd, SHOW_WINDOW_CMD(5)); // SW_SHOW
+        }
         Some(hwnd)
     }
 }
@@ -382,8 +420,17 @@ fn on_left_click(x: i32, y: i32) {
     let mut inbox_now = false;
     let mut album_export_now = false;
     let mut restart_now: Option<HWND> = None;
+    // 注册表读写同样是出锁才做的：慢在注册表上一卡，卡的整壳都跟着停
+    let mut autostart_want: Option<bool> = None;
+    let mut autostart_resync = false;
+    let mut close_answer: Option<CloseChoice> = None;
     match hit {
         HitTarget::Nav(i) => {
+            // 进设置页就回读一次注册表：开关显示的是真值，不是 ini 里那份记忆。
+            // 已经在这页时再点一次导航 = 用户要"再看一眼真值"，同样回读
+            if i == render::TAB_SETTINGS {
+                autostart_resync = true;
+            }
             if st.active_tab != i {
                 // 离开相册页：代际 +1，在途缩略图应答随即作废（否则"上一页的图闪进这一页"）
                 if st.active_tab == render::TAB_ALBUM {
@@ -425,6 +472,16 @@ fn on_left_click(x: i32, y: i32) {
         // 自动连接已绑定设备：只改"下次启动怎么办"，本轮已建立的链路不动
         HitTarget::ToggleAutoConnect => {
             st.auto_connect = !st.auto_connect;
+            persist = true;
+        }
+        // 开机自启动：这里只记下"想要哪个状态"，注册表在出锁后写，写完再按真值回读
+        HitTarget::ToggleAutostart => {
+            autostart_want = Some(!st.autostart);
+        }
+        // 关闭按钮行为：点一下换下一个取值并立刻落盘
+        HitTarget::CycleCloseBehavior => {
+            st.close_behavior = st.close_behavior.next();
+            st.ui_rev += 1;
             persist = true;
         }
         HitTarget::ThemeSet(t) => {
@@ -568,6 +625,20 @@ fn on_left_click(x: i32, y: i32) {
         }
         // 「稍后启动」不丢改动：状态已落盘，功能页会继续显示"待重启生效"
         HitTarget::ModalRestartLater => st.restart_prompt = false,
+        // ---- 关闭询问弹窗：答案只登记，动作（藏窗口 / 退出）在出锁后做 ----
+        h @ (HitTarget::ModalCloseMinimize
+        | HitTarget::ModalCloseExit
+        | HitTarget::ModalCloseCancel) => {
+            close_answer = Some(match h {
+                HitTarget::ModalCloseMinimize => CloseChoice::Minimize,
+                HitTarget::ModalCloseExit => CloseChoice::Exit,
+                _ => CloseChoice::Cancel,
+            });
+        }
+        HitTarget::ModalCloseRemember => {
+            st.close_remember = !st.close_remember;
+            st.ui_rev += 1;
+        }
         // ---- 相册 ----
         HitTarget::AlbumTool(slot) => {
             let per = st.album.per_page.max(1);
@@ -655,8 +726,24 @@ fn on_left_click(x: i32, y: i32) {
         settings::Settings::from_state(&st).save();
     }
     drop(st);
+    if let Some(want) = autostart_want {
+        // 写/删注册表都在锁外；失败就出声，绝不能把"没写成"显示成"已开启"
+        if let Err(why) = autostart::apply(want) {
+            push_error(format!(
+                "开机自启动没能{}：{why}",
+                if want { "开启" } else { "关闭" }
+            ));
+        }
+        autostart_resync = true;
+    }
+    if autostart_resync {
+        sync_autostart_truth();
+    }
+    if let Some(choice) = close_answer {
+        answer_close_prompt(hwnd, choice);
+    }
     if let Some(h) = restart_now {
-        request_close(h);
+        request_exit(h);
     }
     if let Some(on) = sync_debug {
         crate::debug::apply_debug_toggle(on);
@@ -994,6 +1081,66 @@ fn push_error(msg: String) {
     }
 }
 
+/// 用注册表真值刷新「开机自启动」：ini 与注册表不一致时**以注册表为准**并把 ini 同步过去
+/// （用户可能自己在注册表里改过，也可能被安全软件清掉了）。
+/// 读写都在锁外做；读不到时保持界面原样并出声 —— "读不到"不等于"没开"。
+fn sync_autostart_truth() {
+    let observed = autostart::observe();
+    let Some(arc) = shared_state() else {
+        return;
+    };
+    let mut st = arc.lock().unwrap();
+    let entry = match observed {
+        Ok(e) => e,
+        Err(why) => {
+            st.push_error(format!("读不到开机自启动的状态：{why}"));
+            return;
+        }
+    };
+    let (on, ours) = (entry.enabled(), entry.is_ours());
+    let changed = st.autostart != on || st.autostart_is_ours != ours;
+    st.autostart = on;
+    st.autostart_is_ours = ours;
+    if !changed {
+        return;
+    }
+    st.ui_rev += 1;
+    let snap = settings::Settings::from_state(&st);
+    drop(st);
+    snap.save();
+}
+
+/// 回答一次关闭询问：按钮、回车、Esc 三条入口都走这里，决策只在 `decide_close` 一处
+fn answer_close_prompt(hwnd: HWND, choice: CloseChoice) {
+    let Some(arc) = shared_state() else {
+        return;
+    };
+    let (action, snap) = {
+        let mut st = arc.lock().unwrap();
+        let d = decide_close(st.close_behavior, st.close_remember, Some(choice));
+        st.close_prompt = false;
+        st.close_remember = false;
+        st.ui_rev += 1;
+        let snap = match d.persist {
+            Some(b) => {
+                st.close_behavior = b;
+                Some(settings::Settings::from_state(&st))
+            }
+            None => None,
+        };
+        (d.action, snap)
+    };
+    if let Some(s) = snap {
+        s.save();
+    }
+    match action {
+        CloseAction::Minimize => hide_to_tray(hwnd),
+        CloseAction::Exit => request_exit(hwnd),
+        _ => {}
+    }
+    let _ = unsafe { InvalidateRect(hwnd, None, true) };
+}
+
 /// 把文件拖进窗口 → 填成待发送路径（不代发，与「选择…」一致）。
 /// 一次只取第一个：引擎侧同一时刻只有一个 `SendTask`；哪些没被采纳必须说清楚，否则像丢了文件
 fn on_drop_files(hwnd: HWND, hdrop_raw: *mut c_void) {
@@ -1228,17 +1375,33 @@ fn on_backspace() {
     }
 }
 
-/// `WM_KEYDOWN(VK_RETURN)`：回复框里回车即发送。此前自绘界面没有任何一处应答回车，
-/// 而"打完字按回车"是输入的人最自然的下一步——不给就是界面没做完。
-fn on_enter() {
+/// `WM_KEYDOWN(VK_RETURN)`：弹窗开着时回车 = 按默认那颗按钮；否则回复框里回车即发送。
+/// 此前自绘界面没有任何一处应答回车，而"打完字按回车"是输入的人最自然的下一步——不给就是界面没做完。
+fn on_enter(hwnd: HWND) {
     let Some(arc) = shared_state() else {
         return;
     };
+    if arc.lock().unwrap().close_prompt {
+        answer_close_prompt(hwnd, CloseChoice::Minimize);
+        return;
+    }
     let mut st = arc.lock().unwrap();
     if st.input_focus != FOCUS_REPLY {
         return;
     }
     submit_reply(&mut st);
+}
+
+/// `WM_KEYDOWN(VK_ESCAPE)`：关闭询问弹窗上 Esc = 取消（窗口不动）。
+/// 只管这一个弹窗：输入框里的内容不靠 Esc 撤，免得一次误按把用户打的字清了
+fn on_escape(hwnd: HWND) {
+    let Some(arc) = shared_state() else {
+        return;
+    };
+    if !arc.lock().unwrap().close_prompt {
+        return;
+    }
+    answer_close_prompt(hwnd, CloseChoice::Cancel);
 }
 
 /// 请求系统在鼠标离开时发 `WM_MOUSELEAVE`（一次性，每次移动都要重新登记）
@@ -1251,6 +1414,27 @@ fn request_leave_tracking(hwnd: HWND) {
             dwHoverTime: 0,
         };
         let _ = TrackMouseEvent(&mut tme);
+    }
+}
+
+/// 托盘点一下要把窗口摆回来时用哪条 `ShowWindow` 命令。
+/// 「最小化到托盘」走的是 `SW_HIDE`（窗口是藏起来的，不是最小化的），对这种窗口 `SW_RESTORE`
+/// 不顶事；真的最小化过（任务栏那条）才需要 `SW_RESTORE`。判错就是"图标亮着、点它没反应"
+fn restore_cmd(iconic: bool) -> SHOW_WINDOW_CMD {
+    if iconic {
+        SW_RESTORE
+    } else {
+        SW_SHOW
+    }
+}
+
+/// 把窗口摆回前台：托盘那一下与"第二实例请它现身"用的是同一套动作
+fn bring_to_front(hwnd: HWND) {
+    unsafe {
+        let iconic = IsIconic(hwnd).as_bool();
+        let _ = ShowWindow(hwnd, restore_cmd(iconic));
+        let _ = SetForegroundWindow(hwnd);
+        let _ = InvalidateRect(hwnd, None, true);
     }
 }
 
@@ -1469,9 +1653,10 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 (lparam.0 as u32) & 0xFFFF,
                 NIN_SELECT | NIN_KEYSELECT | WM_LBUTTONUP | WM_LBUTTONDBLCLK
             ) {
-                // 最小化时释放过后备缓冲，还原后由 `WM_PAINT` 重建，这里只把窗口带回前台
-                let _ = unsafe { ShowWindow(hwnd, SW_RESTORE) };
-                let _ = unsafe { SetForegroundWindow(hwnd) };
+                // 藏在托盘里的窗口是被 `SW_HIDE` 藏掉的（`--minimized` 拉起的那一次、选了
+                // 「最小化到托盘」的那一次），对它 `SW_RESTORE` 不顶事；真最小化过才需要还原。
+                // 判错就是"图标亮着、点它没反应"。最小化时释放过的后备缓冲由 `WM_PAINT` 重建
+                bring_to_front(hwnd);
             }
             LRESULT(0)
         }
@@ -1495,9 +1680,59 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 let _ = unsafe { InvalidateRect(hwnd, None, true) };
             }
             if wparam.0 == VK_RETURN.0 as usize {
-                on_enter();
+                on_enter(hwnd);
                 let _ = unsafe { InvalidateRect(hwnd, None, true) };
             }
+            if wparam.0 == VK_ESCAPE.0 as usize {
+                on_escape(hwnd);
+                let _ = unsafe { InvalidateRect(hwnd, None, true) };
+            }
+            LRESULT(0)
+        }
+        WM_CLOSE => {
+            // 点关闭按钮（含 Alt+F4）按用户选的「关闭按钮行为」走。重启确认弹窗开着时这里
+            // 直接吞掉：两个模态叠在一起，谁都不认得这颗 ✕
+            let Some(arc) = shared_state() else {
+                return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            };
+            let action = {
+                let mut st = arc.lock().unwrap();
+                if st.restart_prompt {
+                    return LRESULT(0);
+                }
+                let d = decide_close(st.close_behavior, false, None);
+                if d.action == CloseAction::Ask {
+                    st.close_prompt = true;
+                    st.close_remember = false;
+                    // 弹窗期间不留输入焦点：否则敲下去的字进的是一个已经被盖住的输入框
+                    st.input_focus = FOCUS_NONE;
+                    st.ui_rev += 1;
+                }
+                d.action
+            };
+            match action {
+                CloseAction::Ask => {
+                    let _ = unsafe { InvalidateRect(hwnd, None, true) };
+                    LRESULT(0)
+                }
+                CloseAction::Minimize => {
+                    hide_to_tray(hwnd);
+                    LRESULT(0)
+                }
+                // 取消：窗口原地不动
+                CloseAction::Stay => LRESULT(0),
+                // 退出交给默认处理：WM_DESTROY → PostQuitMessage，`main` 的收尾一样不少
+                CloseAction::Exit => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+            }
+        }
+        // 已经答过一次（弹窗里选了退出）或功能改动要重启：不再询问，直接走默认收尾
+        WM_APP_EXIT => {
+            let _ = unsafe { DefWindowProcW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0)) };
+            LRESULT(0)
+        }
+        // 第二实例（再双击一次图标）或外部转交文件：把窗口摆回前台
+        WM_APP_SHOW => {
+            bring_to_front(hwnd);
             LRESULT(0)
         }
         WM_DESTROY => {
@@ -1537,11 +1772,38 @@ mod tests {
         assert_eq!(WM_KEYDOWN, 0x0100);
         assert_ne!(WM_CHAR, WM_KEYDOWN);
         assert_eq!(VK_BACK.0, 0x08);
-        // 两个通知消息不得撞车
+        assert_eq!(VK_ESCAPE.0, 0x1B, "Esc 写错就关不掉询问弹窗");
+        // 四条自建消息不得撞车（撞了就是"重绘请求被当成退出"这种最难查的形态）
+        assert_eq!(WM_APP_STATE_CHANGED, WM_APP + 2);
+        assert_eq!(WM_APP_EXIT, WM_APP + 3);
+        assert_eq!(WM_APP_SHOW, WM_APP + 4);
         assert_ne!(WM_APP_STATE_CHANGED, WM_APP + 1);
+        assert_ne!(WM_APP_EXIT, WM_APP_STATE_CHANGED);
+        assert_ne!(WM_APP_EXIT, WM_APP + 1);
+        assert_ne!(WM_APP_SHOW, WM_APP_EXIT);
+        assert_ne!(WM_APP_SHOW, WM_APP_STATE_CHANGED);
+        assert_ne!(WM_APP_SHOW, crate::tray::CALLBACK);
         // 托盘：注册的那条消息必须就是 WndProc 里分支用的同一条（各写一遍数字就会"注册了没人接"）
         assert_eq!(crate::tray::CALLBACK, WM_APP + 1);
         assert_ne!(crate::tray::CALLBACK, WM_APP_STATE_CHANGED);
+    }
+
+    /// 藏在托盘里的窗口是被 `SW_HIDE` 藏掉的，不是最小化：判错就是"图标亮着、点它没反应"，
+    /// 「最小化到托盘」这条路径整个废掉
+    #[test]
+    fn tray_restore_shows_hidden_windows_and_restores_minimized_ones() {
+        assert_eq!(
+            restore_cmd(false).0,
+            SW_SHOW.0,
+            "被藏起来的窗口用 SW_SHOW 摆回来"
+        );
+        assert_eq!(
+            restore_cmd(true).0,
+            SW_RESTORE.0,
+            "真最小化过的才用 SW_RESTORE"
+        );
+        assert_ne!(SW_SHOW.0, SW_HIDE.0);
+        assert_ne!(SW_SHOW.0, SW_RESTORE.0);
     }
 
     /// 拖出载荷必须 advertise `CF_HDROP(15)`，否则落到任何文件夹都是灰色禁止圈。

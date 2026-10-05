@@ -37,6 +37,8 @@ const READ_INTERVAL_MS: u32 = 1_000;
 static MUTEX_HANDLE: AtomicIsize = AtomicIsize::new(0);
 const CONNECT_TRIES: usize = 12;
 const CONNECT_RETRY: Duration = Duration::from_millis(120);
+/// 「把窗口摆回来」的哨兵载荷：带 NUL，任何真实文件路径都不会等于它
+const SHOW_TOKEN: &str = "\0show";
 
 /// 取得单实例互斥体；`true` = **本进程是唯一实例**。句柄保存在 [`MUTEX_HANDLE`]：正常退出由进程销毁自动释放，
 /// 但**自重启**必须在拉起新实例前先 [`release_single_instance`]，否则新进程看到 `ERROR_ALREADY_EXISTS` 会把自己当第二实例直接退出
@@ -96,6 +98,11 @@ pub(crate) fn forward_path(path: &str) -> bool {
         }
     }
     false
+}
+
+/// 第二实例（用户又双击了一次图标）请运行中的实例显示主窗口
+pub(crate) fn request_show() -> bool {
+    forward_path(SHOW_TOKEN)
 }
 
 pub(crate) fn spawn_pipe_server(state: SharedState) {
@@ -159,6 +166,14 @@ fn pipe_loop(state: SharedState) {
         if path.is_empty() {
             continue;
         }
+        if path == SHOW_TOKEN {
+            let hwnd_raw = {
+                let st = state.lock().unwrap();
+                st.hwnd_raw
+            };
+            crate::window::request_show_from_raw(hwnd_raw);
+            continue;
+        }
         deliver(&state, &path);
     }
 }
@@ -187,4 +202,6 @@ fn deliver(state: &SharedState, path: &str) {
     };
     crate::say(format!("[LinkX] 已把 {path} 填进发送框，按「发送」确认"));
     post_state_changed(hwnd_raw);
+    // 实例可能藏在托盘里：只填输入框的话，用户看到的是"右键发送到 LinkX 之后什么都没发生"
+    crate::window::request_show_from_raw(hwnd_raw);
 }
