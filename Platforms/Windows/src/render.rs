@@ -166,16 +166,35 @@ const SET_SEG_W: i32 = 104;
 #[cfg(windows)]
 const SET_SEG_H: i32 = 34;
 #[cfg(windows)]
-const SET_TOGGLE_Y0: i32 = 152;
-/// 开关行数（**唯一真源**：绘制、命中、以及下方两节的纵位都由它推导）
+const SET_TOGGLE_Y0: i32 = 142;
+/// 开关行数（**唯一真源**：绘制、命中、以及下方各节的纵位都由它推导）
 #[cfg(windows)]
-const SET_ROWS: usize = 5;
-/// 行高 = 标题 22 + 说明 16 + 呼吸 14
+const SET_TOGGLES: usize = 6;
+/// 「开机自启动」所在行：数组顺序、命中与悬停都按这个号，改行序只改这一处
 #[cfg(windows)]
-const SET_ROW_H: i32 = 52;
+const SET_AUTOSTART_ROW: usize = 4;
+/// 「Debug 模式」所在行（右侧同行还有「导出日志」）
+#[cfg(windows)]
+const SET_DEBUG_ROW: usize = SET_TOGGLES - 1;
+/// 「关闭按钮行为」那一行：与开关同一套行几何，右侧换成一个循环取值的按钮
+#[cfg(windows)]
+const SET_BEHAVIOR_ROW: usize = SET_TOGGLES;
+/// 开关区总行数（绘制、命中、悬停按它遍历）
+#[cfg(windows)]
+const SET_ROWS: usize = SET_TOGGLES + 1;
+/// 行高 = 标题 + 说明 + 呼吸。设置页要在**最小客户区**里画得完，行高与下方各节的间隙一起受
+/// 文件末尾那组 `const _` 断言约束——加一行就要动这里，别只改一处
+#[cfg(windows)]
+const SET_ROW_H: i32 = 42;
+/// 说明行相对标题行的下移量
+#[cfg(windows)]
+const SET_DESC_DY: i32 = 21;
 /// 开关列左边界：说明文字一律不得越过这条线（靠人眼保证的话，加一行就叠字）
 #[cfg(windows)]
 const SET_SWITCH_L: i32 = 380;
+/// 「关闭按钮行为」按钮宽度（要装得下最长的一个取值）
+#[cfg(windows)]
+const SET_BEHAVIOR_BTN_W: i32 = 116;
 #[cfg(windows)]
 const SW_W: i32 = 46;
 #[cfg(windows)]
@@ -208,8 +227,9 @@ const FILE_ROW_H: i32 = 46;
 #[cfg(windows)]
 const FILE_MAX_ROWS: usize = 8;
 /// 设置页：设备管理区 / 信息区的纵位**全部由开关区推导**（字面量排布加一行就叠字）；整页按"最小客户区 `LAYOUT_MIN_H` + 页脚 30"倒推，越界由本文件末尾的 `const _` 断言编译期拦下。
+/// 开关区每加一行，这里的间隙与 `SET_ROW_H` 就要一起重算——编译器会拦住，但拦不住"挤成一团"。
 #[cfg(windows)]
-const SET_MANUAL_HINT_Y: i32 = SET_TOGGLE_Y0 + SET_ROWS as i32 * SET_ROW_H + 8;
+const SET_MANUAL_HINT_Y: i32 = SET_TOGGLE_Y0 + SET_ROWS as i32 * SET_ROW_H + 4;
 #[cfg(windows)]
 const SET_MANUAL_Y: i32 = SET_MANUAL_HINT_Y + 18;
 #[cfg(windows)]
@@ -221,7 +241,7 @@ const SET_BOUND_LABEL_Y: i32 = SET_MANUAL_Y + INPUT_H + 12;
 #[cfg(windows)]
 const SET_BOUND_Y0: i32 = SET_BOUND_LABEL_Y + 18;
 #[cfg(windows)]
-const SET_BOUND_ROW_H: i32 = 28;
+const SET_BOUND_ROW_H: i32 = 26;
 #[cfg(windows)]
 const SET_BOUND_MAX: usize = 2;
 /// 设置页：底部信息区（版本 + 本机指纹 / 隐私，两行）
@@ -275,6 +295,12 @@ const MODAL_W: i32 = 460;
 /// 弹窗高度同样按最多 ALL.len() 条改动预留（标题 20 + 正文 62 + 条目 + 间距 + 按钮 36 + 下边距 20）：写死高度时，多出的条目会盖到按钮上。
 #[cfg(windows)]
 const MODAL_H: i32 = 82 + crate::features::ALL.len() as i32 * 20 + 10 + 36 + 20;
+/// 关闭询问弹窗（自绘模态：三个按钮 + 一个勾选，整窗只有这四处分派命中）
+#[cfg(windows)]
+const CLOSE_MODAL_W: i32 = 460;
+/// 上距 20 + 标题 26 + 8 + 正文 20 + 10 + 按钮 36 + 14 + 勾选 22 + 下距 20
+#[cfg(windows)]
+const CLOSE_MODAL_H: i32 = 176;
 /// 相册页纵向：工具行 → 状态行 → 网格 → 详情行 → 页脚。
 /// 网格一律由「格子边长 + 间距」推导，行数列数按客户区算出来——三处（绘制、命中、悬停）共用
 /// `album_geom`，加一列不会变成"画得下点不到"。
@@ -326,6 +352,10 @@ pub(crate) enum HitTarget {
     ToggleToastContent,
     /// 开关「开机后自动连接」
     ToggleAutoConnect,
+    /// 开关「开机自启动」：注册表读写由调用方**出锁后**做
+    ToggleAutostart,
+    /// 「关闭按钮行为」：点一下在三个取值间循环
+    CycleCloseBehavior,
     FocusSendPath,
     SendFile,
     BrowseFile,
@@ -351,6 +381,12 @@ pub(crate) enum HitTarget {
     ModalRestartNow,
     /// 重启确认弹窗「稍后启动」
     ModalRestartLater,
+    /// 关闭询问弹窗的三个按钮（回车/Esc 也走同一批目标）
+    ModalCloseMinimize,
+    ModalCloseExit,
+    ModalCloseCancel,
+    /// 关闭询问弹窗上的「记住我的选择，不再询问」勾选
+    ModalCloseRemember,
     /// 相册工具行按钮（0=刷新 1=上一页 2=下一页 3=全选/取消全选 4=导出）
     AlbumTool(usize),
     /// 点某一格（列表下标；切换选中态）：只在按下时记下、**抬起时才切换**——同一次按住拖动是"拖出"，按下就改选中会让拖拽结束时多选状态莫名其妙地变一位。
@@ -871,10 +907,10 @@ fn identity_card_rect(e: &Env, device_count: usize) -> RECT {
     )
 }
 
-/// 设置页 Debug 行末的「导出日志」按钮（与第 4 行开关同高）
+/// 设置页 Debug 行末的「导出日志」按钮（与 Debug 开关同行）
 #[cfg(windows)]
 fn debug_export_rect(e: &Env) -> RECT {
-    let y = SET_TOGGLE_Y0 + (SET_ROWS as i32 - 1) * SET_ROW_H + 2;
+    let y = SET_TOGGLE_Y0 + SET_DEBUG_ROW as i32 * SET_ROW_H + 2;
     let l = CONTENT_L + SET_SWITCH_L + SW_W + 14;
     lrect(e, l, y, l + SET_INLINE_BTN_W, y + SW_H + 4)
 }
@@ -966,6 +1002,83 @@ fn modal_btn_rects(e: &Env) -> (RECT, RECT) {
         bottom: now.bottom,
     };
     (later, now)
+}
+
+/// 设置页：「关闭按钮行为」按钮（与开关同一行几何、同一列——那一栏本来就是放可点控件的）
+#[cfg(windows)]
+fn set_behavior_rect(e: &Env) -> RECT {
+    let y = SET_TOGGLE_Y0 + SET_BEHAVIOR_ROW as i32 * SET_ROW_H + 2;
+    let l = CONTENT_L + SET_SWITCH_L;
+    lrect(e, l, y, l + SET_BEHAVIOR_BTN_W, y + SW_H + 4)
+}
+
+/// 关闭询问弹窗的每一块：文字位与可点位都出自这一份，绘制 / 命中 / 悬停不许各写一遍坐标
+#[cfg(windows)]
+struct ClosePromptRects {
+    card: RECT,
+    title: RECT,
+    body: RECT,
+    /// 主行动作（也是最右的一颗，回车就是它）
+    minimize: RECT,
+    exit: RECT,
+    cancel: RECT,
+    remember: RECT,
+}
+
+/// 三颗按钮的宽度（逻辑像素，左→右：取消 / 退出程序 / 最小化到托盘）。**按取值定宽**：
+/// 宽度若随文字变，鼠标停在原地就会在两次重绘之间换一颗按钮
+#[cfg(windows)]
+const CLOSE_BTN_W: [i32; 3] = [72, 96, 130];
+#[cfg(windows)]
+const CLOSE_BTN_GAP: i32 = 12;
+
+#[cfg(windows)]
+const _: () = assert!(
+    CLOSE_BTN_W[0] + CLOSE_BTN_W[1] + CLOSE_BTN_W[2] + CLOSE_BTN_GAP * 2 <= CLOSE_MODAL_W - 48,
+    "关闭询问弹窗的三个按钮排不进卡片"
+);
+
+#[cfg(windows)]
+fn close_prompt_rects(e: &Env) -> ClosePromptRects {
+    let l = (e.logical_w() - CLOSE_MODAL_W) / 2;
+    let t = (e.logical_h() - CLOSE_MODAL_H) / 2 - 12;
+    let card = lrect(e, l, t, l + CLOSE_MODAL_W, t + CLOSE_MODAL_H);
+    let slot = |dy: i32, h: i32| RECT {
+        left: card.left + e.px(24),
+        top: card.top + e.px(dy),
+        right: card.right - e.px(24),
+        bottom: card.top + e.px(dy) + e.px(h),
+    };
+    let bottom = card.bottom - e.px(20 + 22 + 14);
+    let mut right = card.right - e.px(24);
+    let mut mk = |w: i32| {
+        let r = RECT {
+            left: right - e.px(w),
+            top: bottom - e.px(36),
+            right,
+            bottom,
+        };
+        right = r.left - e.px(CLOSE_BTN_GAP);
+        r
+    };
+    let minimize = mk(CLOSE_BTN_W[2]);
+    let exit = mk(CLOSE_BTN_W[1]);
+    let cancel = mk(CLOSE_BTN_W[0]);
+    let remember = RECT {
+        left: card.left + e.px(24),
+        right: card.right - e.px(24),
+        top: bottom + e.px(14),
+        bottom: bottom + e.px(14 + 22),
+    };
+    ClosePromptRects {
+        card,
+        title: slot(20, 26),
+        body: slot(54, 20),
+        minimize,
+        exit,
+        cancel,
+        remember,
+    }
 }
 
 #[cfg(windows)]
@@ -1160,13 +1273,27 @@ fn pending_modules(st: &UiState) -> Vec<(crate::features::Module, bool)> {
 /// 命中判定：坐标（物理像素）→ 目标（无命中返回 None）
 #[cfg(windows)]
 pub(crate) fn hit_test(st: &UiState, e: &Env, x: i32, y: i32) -> Option<HitTarget> {
-    // 模态优先：弹窗打开时，除这两个按钮外一律不给命中（含导航区）
+    // 模态优先：弹窗打开时，除弹窗自己的控件外一律不给命中（含导航区）
     if st.restart_prompt {
         let (later, now) = modal_btn_rects(e);
         return if point_in(&now, x, y) {
             Some(HitTarget::ModalRestartNow)
         } else if point_in(&later, x, y) {
             Some(HitTarget::ModalRestartLater)
+        } else {
+            None
+        };
+    }
+    if st.close_prompt {
+        let r = close_prompt_rects(e);
+        return if point_in(&r.minimize, x, y) {
+            Some(HitTarget::ModalCloseMinimize)
+        } else if point_in(&r.exit, x, y) {
+            Some(HitTarget::ModalCloseExit)
+        } else if point_in(&r.cancel, x, y) {
+            Some(HitTarget::ModalCloseCancel)
+        } else if point_in(&r.remember, x, y) {
+            Some(HitTarget::ModalCloseRemember)
         } else {
             None
         };
@@ -1313,9 +1440,16 @@ pub(crate) fn hit_test(st: &UiState, e: &Env, x: i32, y: i32) -> Option<HitTarge
             if point_in(&set_switch_rect(e, 3), x, y) {
                 return Some(HitTarget::ToggleAutoConnect);
             }
+            // 开机自启动（注册表里那条启动项的真值）
+            if point_in(&set_switch_rect(e, SET_AUTOSTART_ROW), x, y) {
+                return Some(HitTarget::ToggleAutostart);
+            }
             // Debug 模式开关 + 导出日志
-            if point_in(&set_switch_rect(e, 4), x, y) {
+            if point_in(&set_switch_rect(e, SET_DEBUG_ROW), x, y) {
                 return Some(HitTarget::ToggleDebug);
+            }
+            if point_in(&set_behavior_rect(e), x, y) {
+                return Some(HitTarget::CycleCloseBehavior);
             }
             if point_in(&debug_export_rect(e), x, y) {
                 return Some(HitTarget::ExportDebug);
@@ -1898,6 +2032,23 @@ pub(crate) fn hover_at(
             },
         );
     }
+    if st.close_prompt {
+        let r = close_prompt_rects(e);
+        return (
+            None,
+            if point_in(&r.minimize, x, y) {
+                Some((26u8, 0))
+            } else if point_in(&r.exit, x, y) {
+                Some((27u8, 0))
+            } else if point_in(&r.cancel, x, y) {
+                Some((28u8, 0))
+            } else if point_in(&r.remember, x, y) {
+                Some((29u8, 0))
+            } else {
+                None
+            },
+        );
+    }
     if x < e.px(NAV_W) {
         // 返回的是**行号**（可见列表里的位置），绘制那边按同一口径高亮
         let vis = nav_visible();
@@ -2016,10 +2167,13 @@ pub(crate) fn hover_at(
                     hit = Some((4u8, i));
                 }
             }
-            for i in 0..SET_ROWS {
+            for i in 0..SET_TOGGLES {
                 if point_in(&set_switch_rect(e, i), x, y) {
                     hit = Some((5u8, i));
                 }
+            }
+            if point_in(&set_behavior_rect(e), x, y) {
+                hit = Some((25u8, 0));
             }
             if point_in(&debug_export_rect(e), x, y) {
                 hit = Some((13u8, 0));
@@ -3435,7 +3589,131 @@ fn paint_restart_modal(hdc: HDC, e: &Env, st: &UiState) {
     );
 }
 
-// ---------- 页：设置 ----------
+// ---------- 关闭询问弹窗（自绘模态）----------
+
+/// 勾选框：方框 + 勾 + 文字。整块区域就是命中区（见 `close_prompt_rects`），点方框和点文字一样
+#[cfg(windows)]
+fn draw_check(hdc: HDC, e: &Env, rc: &RECT, on: bool, hover: bool, label: &str) {
+    let p = &e.pal;
+    let side = e.px(18);
+    let mid = (rc.top + rc.bottom) / 2;
+    let box_rc = rect(rc.left, mid - side / 2, rc.left + side, mid + side / 2);
+    let bg = if on {
+        p.accent
+    } else if hover {
+        p.row_hover_bg
+    } else {
+        p.card_bg
+    };
+    fill_round(hdc, &box_rc, bg, e.px(4));
+    stroke_round(
+        hdc,
+        &box_rc,
+        if on { p.accent } else { p.sub_text },
+        e.px(4),
+    );
+    if on {
+        let (w, h) = (box_rc.right - box_rc.left, box_rc.bottom - box_rc.top);
+        let pts = [
+            windows::Win32::Foundation::POINT {
+                x: box_rc.left + w / 5,
+                y: box_rc.top + h / 2,
+            },
+            windows::Win32::Foundation::POINT {
+                x: box_rc.left + w * 2 / 5,
+                y: box_rc.bottom - h / 4,
+            },
+            windows::Win32::Foundation::POINT {
+                x: box_rc.right - w / 5,
+                y: box_rc.top + h / 4,
+            },
+        ];
+        let old =
+            unsafe { SelectObject(hdc, HGDIOBJ(icons::pen_solid(e.px(2).max(1), 0xFFFFFF).0)) };
+        let _ = unsafe { windows::Win32::Graphics::Gdi::Polyline(hdc, &pts) };
+        unsafe {
+            SelectObject(hdc, old);
+        }
+    }
+    text_out(
+        hdc,
+        e,
+        Role::Small,
+        box_rc.right + e.px(8),
+        mid - role_line_h(e, Role::Small) / 2,
+        label,
+        p.body_text,
+    );
+}
+
+/// 关闭询问弹窗：整窗模态，三个出口加一个勾选，背后一概点不到（分派见 `hit_test`）
+#[cfg(windows)]
+fn paint_close_modal(hdc: HDC, e: &Env, st: &UiState) {
+    let p = &e.pal;
+    let r = close_prompt_rects(e);
+    fill(
+        hdc,
+        &rect(0, 0, e.win_w, e.win_h),
+        blend(p.body_bg, 0x000000, 0.45),
+    );
+    fill_round(hdc, &r.card, p.card_bg, e.px(12));
+    stroke_round(hdc, &r.card, p.divider, e.px(12));
+    text_out(
+        hdc,
+        e,
+        Role::Title,
+        r.title.left,
+        r.title.top,
+        "关闭 LinkX？",
+        p.body_text,
+    );
+    let body = "最小化到托盘只是收起窗口，程序继续在后台运行。";
+    let body = truncate_px(hdc, e, Role::Body, body, r.body.right - r.body.left);
+    text_out(
+        hdc,
+        e,
+        Role::Body,
+        r.body.left,
+        r.body.top,
+        &body,
+        p.sub_text,
+    );
+    button(
+        hdc,
+        e,
+        &r.cancel,
+        "取消",
+        false,
+        st.list_hover == Some((28, 0)),
+    );
+    button(
+        hdc,
+        e,
+        &r.exit,
+        "退出程序",
+        false,
+        st.list_hover == Some((27, 0)),
+    );
+    // 默认动作（回车）排在最右的主行位上：它不销毁任何东西，按错了也不可损失
+    button(
+        hdc,
+        e,
+        &r.minimize,
+        "最小化到托盘",
+        true,
+        st.list_hover == Some((26, 0)),
+    );
+    draw_check(
+        hdc,
+        e,
+        &r.remember,
+        st.close_remember,
+        st.list_hover == Some((29, 0)),
+        "记住我的选择，不再询问",
+    );
+}
+
+// ---------- 页：关于 ----------
 
 #[cfg(windows)]
 /// 关于页：文案与外链都取自 `crate::about`（单一来源），这里只管排版——
@@ -3534,8 +3812,8 @@ fn paint_settings(hdc: HDC, e: &Env, st: &UiState) {
         p.sub_text,
     );
 
-    // 开关行（第 5 行 = Debug 模式；「导出日志」与它同行）
-    let rows: [(&str, &str, bool); 5] = [
+    // 开关行（第 5 行 = Debug 模式；「导出日志」与它同行；最后一行是关闭按钮行为）
+    let rows: [(&str, &str, bool); SET_TOGGLES] = [
         (
             "消息弹窗",
             "手机通知到达时弹出 Windows 系统通知",
@@ -3561,6 +3839,17 @@ fn paint_settings(hdc: HDC, e: &Env, st: &UiState) {
             st.auto_connect,
         ),
         (
+            "开机自启动",
+            if !st.autostart {
+                "登录 Windows 后不自动启动"
+            } else if !st.autostart_is_ours {
+                "当前启动项不是本机写入的内容"
+            } else {
+                "登录 Windows 后自动启动，且不显示主窗口"
+            },
+            st.autostart,
+        ),
+        (
             "Debug 模式",
             if st.debug_enabled {
                 "全栈运行日志已开启（落盘 LinkX\\Logs，可导出给开发者）"
@@ -3570,8 +3859,10 @@ fn paint_settings(hdc: HDC, e: &Env, st: &UiState) {
             st.debug_enabled,
         ),
     ];
+    // 行号与命中判定共用：数组顺序改了就在这里响，而不是"点开关拨的是隔壁那一行"
+    debug_assert_eq!(rows.get(SET_AUTOSTART_ROW).map(|r| r.0), Some("开机自启动"));
+    debug_assert_eq!(rows.get(SET_DEBUG_ROW).map(|r| r.0), Some("Debug 模式"));
     for (i, (label, desc, on)) in rows.iter().enumerate() {
-        debug_assert_eq!(rows.len(), SET_ROWS, "SET_ROWS 与实际开关数不一致");
         let y = e.px(SET_TOGGLE_Y0 + i as i32 * SET_ROW_H);
         text_out(
             hdc,
@@ -3589,12 +3880,47 @@ fn paint_settings(hdc: HDC, e: &Env, st: &UiState) {
             e,
             Role::Small,
             e.px(CONTENT_L),
-            y + e.px(24),
+            y + e.px(SET_DESC_DY),
             &desc,
             p.sub_text,
         );
         let sr = set_switch_rect(e, i);
         draw_switch(hdc, e, &sr, *on, st.list_hover == Some((5, i)));
+    }
+    // 关闭按钮行为：右侧那一栏换成一个取值按钮，点一下在三个值之间循环
+    {
+        let y = e.px(SET_TOGGLE_Y0 + SET_BEHAVIOR_ROW as i32 * SET_ROW_H);
+        text_out(
+            hdc,
+            e,
+            Role::BodyStrong,
+            e.px(CONTENT_L),
+            y,
+            "关闭按钮行为",
+            p.body_text,
+        );
+        let desc = match st.close_behavior {
+            crate::settings::CloseBehavior::Ask => "点关闭按钮时先问一句",
+            crate::settings::CloseBehavior::Minimize => "点关闭按钮就收进托盘，程序继续运行",
+            crate::settings::CloseBehavior::Exit => "点关闭按钮就退出程序",
+        };
+        text_out(
+            hdc,
+            e,
+            Role::Small,
+            e.px(CONTENT_L),
+            y + e.px(SET_DESC_DY),
+            &truncate_px(hdc, e, Role::Small, desc, e.px(SET_SWITCH_L - 24)),
+            p.sub_text,
+        );
+        button(
+            hdc,
+            e,
+            &set_behavior_rect(e),
+            st.close_behavior.label(),
+            false,
+            st.list_hover == Some((25, 0)),
+        );
     }
     // Debug 日志导出（任意目录；日志含配对与设备信息，仅交给可信方）
     button(
@@ -4372,6 +4698,9 @@ fn paint_gdi(hdc: HDC, hwnd: HWND, st: &UiState) {
     if st.restart_prompt {
         paint_restart_modal(hdc, e, st);
     }
+    if st.close_prompt {
+        paint_close_modal(hdc, e, st);
+    }
 }
 
 /// 往给定 HDC 绘制整窗（HDC 生命周期由 window.rs 的 BeginPaint/EndPaint 管理）
@@ -4385,12 +4714,27 @@ pub(crate) fn paint(hdc: HDC, hwnd: HWND, st: &UiState) {
 
 #[cfg(windows)]
 const _: () = assert!(
-    SET_TOGGLE_Y0 + (SET_ROWS as i32 - 1) * SET_ROW_H + 24 + 16 <= SET_MANUAL_HINT_Y,
+    SET_TOGGLE_Y0 + (SET_ROWS as i32 - 1) * SET_ROW_H + SET_DESC_DY + 16 <= SET_MANUAL_HINT_Y,
     "开关说明文字压到设备管理标题"
 );
 #[cfg(windows)]
 const _: () = assert!(
-    SET_TOGGLE_Y0 + (SET_ROWS as i32 - 1) * SET_ROW_H + 2 + SW_H + 4 <= SET_MANUAL_HINT_Y,
+    SET_DESC_DY + 16 <= SET_ROW_H,
+    "同一行的说明文字压到了下一行的标题"
+);
+#[cfg(windows)]
+const _: () = assert!(
+    SET_AUTOSTART_ROW + 1 == SET_DEBUG_ROW && SET_DEBUG_ROW + 1 == SET_BEHAVIOR_ROW,
+    "设置页行序变了要同步 paint 的数组顺序与 hit_test 的行号"
+);
+#[cfg(windows)]
+const _: () = assert!(
+    SET_SWITCH_L + SET_BEHAVIOR_BTN_W <= MIN_ROW_W,
+    "关闭按钮行为那一列在最小窗口下伸出内容区"
+);
+#[cfg(windows)]
+const _: () = assert!(
+    SET_TOGGLE_Y0 + SET_DEBUG_ROW as i32 * SET_ROW_H + 2 + SW_H + 4 <= SET_MANUAL_HINT_Y,
     "导出日志按钮压到设备管理标题"
 );
 #[cfg(windows)]
@@ -4757,5 +5101,87 @@ mod layout_tests {
             last.right <= e.px(LAYOUT_MIN_W - CONTENT_R_PAD),
             "媒体按钮排超出最小客户区"
         );
+    }
+
+    /// 设置页开关区：行与行、行与下一节都不许叠字，右侧那一列也不许伸出内容区。
+    /// 编译期断言管的是"最后一行 vs 下一节"，这里管的是"每一行 vs 它的下一行"——行高改小
+    /// 时只有这条会红。
+    #[test]
+    fn settings_rows_never_share_a_line() {
+        let e = crate::theme::test_env(LAYOUT_MIN_W, LAYOUT_MIN_H, 1.0);
+        let content_right = e.px(CONTENT_L + MIN_ROW_W);
+        for i in 0..SET_TOGGLES {
+            let sw = set_switch_rect(&e, i);
+            assert!(sw.right <= content_right, "第 {i} 行的开关伸出内容区");
+            assert!(
+                sw.bottom <= e.px(SET_MANUAL_HINT_Y),
+                "第 {i} 行的开关压到设备管理标题"
+            );
+            let next = set_switch_rect(&e, i + 1);
+            assert!(
+                sw.bottom < next.top,
+                "第 {i} 行与第 {} 行的控件叠在一起：{} vs {}",
+                i + 1,
+                sw.bottom,
+                next.top
+            );
+        }
+        let beh = set_behavior_rect(&e);
+        assert!(
+            beh.right <= content_right,
+            "「关闭按钮行为」的按钮在最小窗口下伸出内容区：{}",
+            beh.right
+        );
+        assert!(
+            beh.bottom < e.px(SET_MANUAL_HINT_Y),
+            "行为行压到设备管理标题"
+        );
+        // 「导出日志」与行末控件历来吃的是右侧那 32 的页边距（不是内容行宽），判据只能是客户区边界
+        assert!(
+            debug_export_rect(&e).right <= e.px(LAYOUT_MIN_W),
+            "「导出日志」伸出客户区"
+        );
+    }
+
+    /// 关闭询问弹窗：三颗按钮与勾选必须都在卡片里、互不压住，且在最小客户区也整个看得见
+    #[test]
+    fn close_prompt_fits_its_card_at_the_min_size() {
+        for (w, h) in [(LAYOUT_MIN_W, LAYOUT_MIN_H), (1400, 900)] {
+            let e = crate::theme::test_env(w, h, 1.0);
+            let r = close_prompt_rects(&e);
+            let named = [
+                ("取消", &r.cancel),
+                ("退出程序", &r.exit),
+                ("最小化到托盘", &r.minimize),
+                ("记住勾选", &r.remember),
+            ];
+            for (name, b) in named {
+                assert!(
+                    b.right > b.left && b.bottom > b.top,
+                    "{name} 尺寸算成反向：{b:?}"
+                );
+                assert!(
+                    b.left >= r.card.left && b.right <= r.card.right,
+                    "{name} 出卡片左右边界：{b:?} vs {:?}",
+                    r.card
+                );
+                assert!(
+                    b.top >= r.body.bottom && b.bottom <= r.card.bottom,
+                    "{name} 出卡片上下边界：{b:?} vs {:?}",
+                    r.card
+                );
+                assert!(b.left >= e.px(0) && b.top >= e.px(0), "{name} 跑到客户区外");
+            }
+            assert!(
+                r.cancel.right < r.exit.left && r.exit.right < r.minimize.left,
+                "三颗按钮互相压住"
+            );
+            assert!(r.remember.top >= r.minimize.bottom, "勾选压在按钮上");
+            // 卡片居中后仍要在最小客户区内看得见（负坐标=画到屏幕外）
+            assert!(
+                r.card.top >= 0 && r.card.bottom <= e.px(h),
+                "卡片超出客户区"
+            );
+        }
     }
 }

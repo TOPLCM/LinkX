@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "debuglog"
-version = "0.5.0"
+version = "0.5.1"
 
 [[package]]
 name = "der"
@@ -483,7 +483,7 @@ dependencies = [
 
 [[package]]
 name = "linkx-app"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "hex",
  "linkx-crypto",
@@ -497,7 +497,7 @@ dependencies = [
 
 [[package]]
 name = "linkx-crypto"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "chacha20poly1305",
  "debuglog",
@@ -514,7 +514,7 @@ dependencies = [
 
 [[package]]
 name = "linkx-debugd"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "debuglog",
  "serde_json",
@@ -522,7 +522,7 @@ dependencies = [
 
 [[package]]
 name = "linkx-ffi"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "debuglog",
  "hex",
@@ -536,7 +536,7 @@ dependencies = [
 
 [[package]]
 name = "linkx-lan"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "debuglog",
  "linkx-crypto",
@@ -546,7 +546,7 @@ dependencies = [
 
 [[package]]
 name = "linkx-protocol"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "hex",
  "prost",
@@ -556,7 +556,7 @@ dependencies = [
 
 [[package]]
 name = "linkx-session"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "debuglog",
  "hmac",
@@ -569,7 +569,7 @@ dependencies = [
 
 [[package]]
 name = "linkx-storage"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "debuglog",
  "rusqlite",
@@ -578,7 +578,7 @@ dependencies = [
 
 [[package]]
 name = "linkx-transfer"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "crc32fast",
  "debuglog",
@@ -590,7 +590,7 @@ dependencies = [
 
 [[package]]
 name = "linkx-windows"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "debuglog",
  "linkx-crypto",
