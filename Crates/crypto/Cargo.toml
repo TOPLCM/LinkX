@@ -1,0 +1,24 @@
+[package]
+name = "linkx-crypto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "LinkX 安全层：ChaCha20-Poly1305 消息加密 + Noise XX 握手 + SAS/TOFU（Y4/Y5/H2）"
+
+[dependencies]
+debuglog.workspace = true
+chacha20poly1305.workspace = true
+snow.workspace = true
+x25519-dalek.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+hkdf.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+# 0.3.0 决策 C：RSA-2048 设备身份（签名/验签）
+rsa.workspace = true
+# 自定义 Noise resolver 运行时 RNG（snow 默认 resolver 已关闭）
+rand.workspace = true
+
+[dev-dependencies]

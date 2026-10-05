@@ -1,0 +1,11 @@
+# buf 代码生成配置（Y6）：本地 exec 插件
+# 前置：cargo install protoc-gen-prost
+version: v1
+plugins:
+  - name: prost
+    out: ../Crates/protocol/src/pb
+    opt:
+      - bytes=.
+  - name: javalite
+    out: ../Platforms/Android/app/generated/proto
+    opt: lite

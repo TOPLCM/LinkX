@@ -1,0 +1,75 @@
+# LinkX monorepo workspace 根（结构与职责划分见 开发过程文档（不随本仓库发布） 与 DIRECTORY.md）
+[workspace]
+resolver = "2"
+members = [
+    "Crates/protocol",
+    "Crates/crypto",
+    "Crates/session",
+    "Crates/lan",
+    "Crates/transfer",
+    "Crates/storage",
+    "Crates/debuglog",
+    # 本机回环调试控制面（宿主以 optional dependency + agent-debug feature 门禁，
+    # 交付构建不启用即完全不参与编译）
+    "Crates/debugd",
+    "Crates/ffi",
+    "Crates/app",
+    "Platforms/Windows",
+]
+# fuzz 目标自带独立 workspace（nightly + sanitizer），显式排除避免成员判定冲突
+exclude = ["Tests/fuzz"]
+default-members = ["Crates/app"]
+
+[workspace.package]
+version = "0.5.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+rust-version = "1.97.1"
+
+# workspace 级依赖版本统一源（5.1 K3 对齐）
+[workspace.dependencies]
+linkx-protocol = { path = "Crates/protocol" }
+linkx-crypto = { path = "Crates/crypto" }
+linkx-session = { path = "Crates/session" }
+linkx-lan = { path = "Crates/lan" }
+linkx-transfer = { path = "Crates/transfer" }
+linkx-storage = { path = "Crates/storage" }
+# 0.3.0 决策 M/D/H：双端 Debug 模式全栈日志核心（NDJSON + 环形现场 + 滚动 + 导出）
+debuglog = { path = "Crates/debuglog" }
+# 调试控制面（/state + /logs + 计数器），仅本机回环，交付构建不启用
+linkx-debugd = { path = "Crates/debugd" }
+linkx-ffi = { path = "Crates/ffi" }
+# 2026-09-30：vendored LocalSend 核心已从仓库删除（真实开发从未用到它，只有未接线的
+# ls-interop 在引用）。它的许可与署名义务仍在——生产路径用的文件名规则是它的移植版，
+# 许可全文与出处见 `Licenses/localsend/`，登记见 `THIRD_PARTY_LICENSES.md`。
+
+chacha20poly1305 = "0.10.1"
+# Y4：关闭 snow 默认 resolver（其会拉入 aes-gcm），由 linkx-crypto 自定义 resolver 提供
+# ChaCha20Poly1305 / SHA256 / X25519 原语
+snow = { version = "0.9.6", default-features = false }
+x25519-dalek = { version = "2.0", default-features = false, features = ["static_secrets", "zeroize"] }
+# 0.3.0 决策 C：RSA-2048 持久化设备身份（仅签名/验签，不参与消息加密；Y4 不变）
+rsa = { version = "0.9", features = ["sha2"] }
+sha2 = "0.10.8"
+crc32fast = "1.4.2"
+hmac = "0.12.1"
+hkdf = "0.12.4"
+hex = "0.4.3"
+rand = "0.8.5"
+thiserror = "1.0.61"
+prost = "0.12.6"
+prost-build = "0.12.6"
+rusqlite = { version = "0.31.0", features = ["bundled"] }
+serde = { version = "1.0.203", features = ["derive"] }
+serde_json = "1.0.120"
+
+# L1：panic=abort（全 profile，防 panic 穿越 FFI 边界）
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

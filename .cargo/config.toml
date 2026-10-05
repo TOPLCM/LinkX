@@ -1,0 +1,11 @@
+# Windows MinGW 交叉链接器（与 Scripts/build-mingw-windows.sh、build.rs 的约定一致）
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+
+# Android 链接器由 cargo-ndk 注入（ANDROID_NDK_HOME/TARGET_CC），此处不写死路径
+[target.aarch64-linux-android]
+linker = "aarch64-linux-android21-clang"
+
+# 构建产物目录统一为 Target/（命名规范：目录首字母大写）
+[build]
+target-dir = "Target"

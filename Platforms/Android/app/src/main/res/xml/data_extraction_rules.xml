@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  MF-01：显式排除「身份私钥/会话状态」类数据的备份与设备迁移。
+  配合 AndroidManifest 的 android:allowBackup="false"，确保
+  adb backup / 云备份 / 换机克隆都不能导出身份材料 —— 换机应重新配对，
+  而不是把长期身份复制到新设备（否则会出现「指纹漂移」）。
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+    </device-transfer>
+</data-extraction-rules>

@@ -1,0 +1,43 @@
+/Target/
+**/target/
+**/.gradle/
+**/.kotlin/
+**/build/
+**/local.properties
+Platforms/Android/.idea/
+Platforms/Android/*.iml
+.cargo-internal
+*.keystore
+*.jks
+/Temp/
+
+# 工具链真身（体积巨大，仅本机/沙箱持久化，不入源码库；恢复见 Scripts/restore-toolchain.sh）
+/Tools/Toolchain/
+
+# WiX Toolset 本机安装副本（同上，属工具链真身，非项目源码；磁盘保留，仅不入库）
+/Tools/Wix/
+
+# 测试签名密钥（APK 自签用，仅本机/沙箱；正式发布密钥另行管理）
+/Tools/Keys/
+
+# 交付产物出口（产物用 Release 页面分发，不入源码库）
+/Release/Docs/*.tar.gz
+/Release/Docs/*.zip
+/Release/Docs/*.sha256
+/Release/Windows/*
+/Release/Android/*
+/Release/*.zip
+
+# fuzz：崩溃样本不入库（corpus 保留入库，作为回归种子）
+Tests/fuzz/artifacts/
+__pycache__/
+*.pyc
+
+# 本机产物：历史调试包 + 归档目录里的安装包二进制（仓库只跟踪 .sha256 校验值，
+# 二进制走 Releases 页面分发；这条规则也防止 git add Release/Archive 把几十 MB 拉进树）
+Release/Debug/
+Release/Archive/**/LinkX-*.msi
+Release/Archive/**/LinkX-*.apk
+Release/Archive/**/LinkX-*.idsig
+
+.zcode/

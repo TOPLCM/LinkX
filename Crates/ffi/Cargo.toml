@@ -1,0 +1,31 @@
+[package]
+name = "linkx-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "LinkX FFI 边界：C ABI (linkx_core) + TX 事件队列（4.9 / I4，三条铁律）"
+
+[lib]
+name = "linkx_core"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+debuglog.workspace = true
+linkx-crypto.workspace = true
+linkx-protocol.workspace = true
+linkx-session.workspace = true
+hex.workspace = true
+# 调试控制面。仅 agent-debug 时编译（交付 .so 不带，沿用 Windows 侧同一门禁口径）。
+linkx-debugd = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[features]
+# Android JNI 导出（构建 linkx_core.so 时启用；host 测试默认关闭避免引入 jni 依赖）
+jni = ["dep:jni"]
+# 本机回环调试控制面。**刻意不进 default**：交付构建不启用即完全不进产物。
+agent-debug = ["dep:linkx-debugd", "dep:serde_json"]
+
+[dependencies.jni]
+version = "0.21.1"
+optional = true

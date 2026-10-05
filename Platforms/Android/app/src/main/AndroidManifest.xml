@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- BLE Peripheral：只广播 + 连自己，**不扫描** ⇒ 不申报 BLUETOOTH_SCAN。
+         清单与实际用途必须一一对应：公开版 APK 里多一条"查找附近蓝牙设备"既吓人也解释不清。 -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- 前台服务（通知转发保活） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 开机/覆盖安装后把链路服务拉回来：没有它，手机重启后通知监听没人去绑，
+         用户必须手动打开一次 App 才能恢复。 -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- 后台运行引导：只用来查询+跳系统面板，不申请电池白名单就没法把状态显示准 -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- 通知监听（NLS，4.3.2） -->
+    <uses-permission android:name="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE" />
+    <!-- 局域网直连：UDP 广播发现 + TCP 文件传输（普通权限，安装即授予，非运行时权限）。
+         说明：Android 上**任何** Socket（TCP/UDP，含局域网）都需要 INTERNET 权限，
+         否则 DatagramSocket/Socket 构造即抛 SecurityException。SAF 与接收目录
+         （getExternalFilesDir）本身无需存储权限；下面的图片权限只服务 0.4.2 相册应答方。 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- 普通权限（装上即有，不弹框）：只为判断"现在到底连没连在局域网里"，
+         好在缺前提时提示用户去开，而不是让界面沉默地扫不到设备。 -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- 0.4.2 图片互传 / 0.4.3 加视频（手机 = 相册应答方）：只读本机相册的元信息与图像/视频，
+         用途仅限"把照片与视频传给同一局域网内已配对的电脑"——不上传网络、不申请写权限、
+         也不在手机上留任何缩略图缓存（用户口径：关掉就没有）。
+         API 33+ 把媒体权限按类型拆开了：READ_MEDIA_IMAGES 只到图片，视频要另给
+         READ_MEDIA_VIDEO——两条都申请，用户只勾其中一条时 MediaStore 会自动把没授权
+         那一类整类过滤掉，清单不会出错，只是少一截；
+         READ_MEDIA_VISUAL_USER_SELECTED 是 Android 14「仅选定照片」的降级授权入口，
+         给了它就只能服务用户选中的那几张，界面上必须如实标明；
+         READ_EXTERNAL_STORAGE 只服务 API 32 及更早（那时还没有按类型拆分）。 -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@drawable/ic_launcher"
+        android:theme="@style/Theme.LinkX"
+        android:supportsRtl="true"
+        android:allowBackup="false"
+        android:fullBackupContent="false"
+        android:dataExtractionRules="@xml/data_extraction_rules">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode|density|fontScale|locale|layoutDirection"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- 「分享到 LinkX」：其它 App（相册/文件管理器）一键把文件送进互传页。
+                 这是手机侧最自然的发文件入口，比"先打开 LinkX 再挑文件"少三步。 -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+        </activity>
+
+        <!-- 通知动作的落地页：透明、不进最近任务、读完即弃。 -->
+        <activity
+            android:name=".ClipboardSendActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleInstance"
+            android:taskAffinity=""
+            android:theme="@style/Theme.LinkX.Transparent" />
+
+        <!-- 开机 / 覆盖安装后拉起链路服务（详见 BootReceiver）。 -->
+        <receiver
+            android:name=".BootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- 收到的文件在应用外部私有目录，直接给 file:// 会被系统拒绝（FileUriExposedException），
+             必须经 FileProvider 换成 content:// 才能"打开/分享"。 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+        <!-- 通知监听（需用户在设置中手动开启"允许读取通知"）。
+             该服务必须 exported=true 并受系统权限保护，否则系统无法绑定。 -->
+        <service
+            android:name=".NlsService"
+            android:label="@string/nls_label"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
+        <!-- BLE GATT Server（4.3.2 链路角色：手机 = Peripheral）。
+             MF-02：仅由本应用前台服务启动，**不需要**对外暴露 → exported=false。 -->
+        <service
+            android:name=".BlePeripheralService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice">
+        </service>
+    </application>
+</manifest>

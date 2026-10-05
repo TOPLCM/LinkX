@@ -1,0 +1,16 @@
+// 跨端配置同步，CONFIG_SYNC 的 body（消息号单源在 tlv.rs 的 MSG_CONFIG_SYNC = 0x08）
+//
+// 适用范围：`scope = cross` 与 `scope = per_peer` 的配置项（如通知黑名单），
+// 握手完成（PAIRED）后经加密通道交换；`scope = local` 的配置（外观/主题等）不出本机。
+syntax = "proto3";
+package linkx.v1;
+
+message ConfigSync {
+  repeated ConfigEntry entries = 1;
+}
+
+message ConfigEntry {
+  string key = 1;   // 配置键，如 "notify.blacklist"
+  string value = 2; // 配置值（JSON 文本或裸字符串）
+  string scope = 3; // local | cross | per_peer
+}

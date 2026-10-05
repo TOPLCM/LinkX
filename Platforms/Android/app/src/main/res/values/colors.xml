@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 窗口底色：与 Compose 主题 background 对齐，避免冷启动/切页时闪白 -->
+    <color name="window_background">#FFF6F7F9</color>
+    <color name="brand_blue">#FF3399F5</color>
+</resources>
