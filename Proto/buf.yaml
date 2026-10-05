@@ -5,7 +5,9 @@ lint:
   use:
     - STANDARD
   except:
-    - PACKAGE_VERSION_SUFFIX # 不做 v1 后缀强制（proto 已按目录分层）
+    - PACKAGE_VERSION_SUFFIX   # 不做 v1 后缀强制（proto 已按目录分层）
+    - ENUM_VALUE_PREFIX        # 媒体指令的枚举值沿用动作语义（PLAY/PAUSE/…），
+    - ENUM_ZERO_VALUE_SUFFIX   # 改带前缀的名字要同步动两端常量表，不值得；新枚举请照 Kind 的写法
 breaking:
   use:
     - FILE
