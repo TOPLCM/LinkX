@@ -45,8 +45,10 @@ pub struct OtpCode {
 /// 从 `title + text` 里提取验证码；没有可信结果返回 `None`。
 /// 位置一律按 **char** 计（不按字节）：中文按 UTF-8 存，字节偏移会把距离算成 3 倍。
 pub fn extract_code(title: &str, text: &str) -> Option<OtpCode> {
-    let hay = format!("{title} {text}");
-    let chars: Vec<char> = hay.to_lowercase().chars().collect();
+    // 关键词下标和数字下标必须出自同一份字符串：`to_lowercase` 对个别字符会改变 char 个数
+    // （土耳其语 İ 折叠成 i + 组合点 = 2 个 char），两份字符串错位后"离关键词多远"就算错了
+    let hay = format!("{title} {text}").to_lowercase();
+    let chars: Vec<char> = hay.chars().collect();
     let mut hits: Vec<(usize, &'static str)> = Vec::new();
     for kw in KEYWORDS {
         let pat: Vec<char> = kw.chars().collect();
@@ -211,5 +213,28 @@ mod tests {
             extract_code("短信验证码", "6 6 8 8 9 9 请在 5 分钟内使用").expect("标题里就该给语境");
         assert_eq!(c.digits, "668899");
         assert_eq!(c.keyword, "验证码");
+    }
+
+    /// İ 折叠成 2 个 char：关键词下标按折叠后的串量、数字下标按折叠前的串量，两者会错开一个
+    /// 偏移，40 字符的距离窗口被莫名放宽。本例正好卡在界外一位。
+    #[test]
+    fn case_folding_does_not_shift_the_distance_window() {
+        let text = format!("code{}123456", " ".repeat(37));
+        assert_eq!(
+            extract_code("XXXXXXXX", &text).map(|c| c.digits),
+            None,
+            "前提：等长 ASCII 标题下这个距离在窗口外"
+        );
+        assert_eq!(
+            extract_code("İİİİ", &text).map(|c| c.digits),
+            None,
+            "4 个 İ 不许把界外的码挪进窗"
+        );
+        // 界内一位的对照：不是"这种写法一律不认"
+        let inside = format!("code{}123456", " ".repeat(36));
+        assert_eq!(
+            extract_code("İİİİ", &inside).map(|c| c.digits),
+            Some("123456".to_string())
+        );
     }
 }

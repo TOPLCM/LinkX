@@ -317,15 +317,34 @@ fn from_browser(head: &str) -> bool {
     }
     // 没有 Host 就不是合法的 HTTP/1.1 请求，留给后面的派发按 400/404 处理
     let Some(h) = host else { return false };
-    let name = match h.split_once(']') {
+    let bare = match h.split_once(']') {
         // [::1]:55699 这种带方括号的 IPv6 字面量
-        Some((pre, _)) => format!("{pre}]"),
-        None => h
-            .rsplit_once(':')
-            .map_or(h.as_str(), |(n, _)| n)
-            .to_string(),
+        Some((pre, _)) => pre.trim_start_matches('[').to_string(),
+        None => h.rsplit_once(':').map_or(h.clone(), |(n, _)| n.to_string()),
     };
-    !(name == "localhost" || name == "[::1]" || name.starts_with("127."))
+    !is_loopback_host(&bare)
+}
+
+/// 回环主机名判定：**只认字面量，不做任何 DNS 解析**（保持同步、无外联）。
+///
+/// 不能写成 `starts_with("127.")`：`127.0.0.1.nip.io` 这类公共解析服务会把这种名字
+/// 真的解析到 127.0.0.1，前缀判定等于把 DNS 重绑的第一道闸形同虚设。
+fn is_loopback_host(name: &str) -> bool {
+    if name == "localhost" || name == "::1" {
+        return true;
+    }
+    // 127.0.0.0/8 的 IPv4 字面量：恰好四段、每段都是 0-255、首段为 127
+    let mut parts = name.split('.');
+    let (Some(a), Some(b), Some(c), Some(d), None) = (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) else {
+        return false;
+    };
+    a == "127" && b.parse::<u8>().is_ok() && c.parse::<u8>().is_ok() && d.parse::<u8>().is_ok()
 }
 
 /// 解析请求行并派发。**输入完全不可信**，因此只用 split/get，不做任何 unwrap。
@@ -398,18 +417,10 @@ fn action_json(name: &str, query: &str) -> (u16, &'static str, String) {
         Ok(text) => text.clone(),
         Err(why) => why.clone(),
     };
-    let mut text = String::new();
-    for c in payload.chars() {
-        match c {
-            '"' => text.push_str("\\\""),
-            '\\' => text.push_str("\\\\"),
-            '\n' => text.push_str("\\n"),
-            '\r' => text.push_str("\\r"),
-            '\t' => text.push_str("\\t"),
-            c if (c as u32) < 0x20 => {}
-            c => text.push(c),
-        }
-    }
+    let text = json_escape(&payload);
+    // `name` 取自请求行（`/action/<名字>`），和 result 一样属于不可信输入：不转义的话，
+    // 一个带引号的动作名就能改写这段 JSON 的结构。
+    let name = json_escape(name);
     (
         if result.is_ok() { 200 } else { 400 },
         "application/json",
@@ -418,6 +429,23 @@ fn action_json(name: &str, query: &str) -> (u16, &'static str, String) {
             result.is_ok()
         ),
     )
+}
+
+/// 转成 JSON 字符串字面量的内容：控制字符直接丢掉，其余按 JSON 的转义表来。
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {}
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn counters_value() -> Value {
@@ -632,6 +660,20 @@ mod tests {
         assert!(body.contains("\"action\":\"__probe__\""), "{body}");
     }
 
+    /// 动作名取自请求行（`/action/<名字>`），不转义就等于让调用方改写响应的 JSON 结构。
+    #[test]
+    fn action_name_cannot_forge_the_response_json() {
+        let name = "x\",\"ok\":true,\"injected\":\"y";
+        let (_, _, body) = action_json(name, "");
+        let v: serde_json::Value = serde_json::from_str(&body).expect("响应必须是合法 JSON");
+        assert_eq!(v["action"], name, "动作名应原样待在 action 字段里");
+        assert_eq!(v["ok"], false, "宿主未注册处理器时不该被改写成 ok:true");
+        assert!(
+            v.get("injected").is_none(),
+            "注入出来的字段不该存在：{body}"
+        );
+    }
+
     /// 动作失败时，原因必须出现在响应体里：`action_json` 若只转义 `Ok` 分支，`Err` 的字符串会被整段丢弃，脚本侧每次失败都长成 `ok:false,"result":""`。
     #[test]
     fn failed_action_carries_its_reason() {
@@ -667,6 +709,18 @@ mod tests {
         let rebind = "GET /state HTTP/1.1\r\nHost: linkx.test:55699\r\n\r\n";
         assert!(from_browser(rebind), "DNS 重绑的 Host 没被拒");
         assert_eq!(route(rebind).0, 403);
+        // ①b 以 127. 开头但根本不是 IP 字面量的名字：*.nip.io 这类公共解析服务会把
+        //     "127.0.0.1.nip.io" 真的解析到 127.0.0.1，前缀匹配等于把这道闸敞开。
+        for host in [
+            "127.0.0.1.nip.io:55699",
+            "127.1",
+            "127.0.0.1.evil.example",
+            "127.0.0.999",
+        ] {
+            let head = format!("GET /state HTTP/1.1\r\nHost: {host}\r\n\r\n");
+            assert!(from_browser(&head), "非字面量回环名没被拒：{host}");
+            assert_eq!(route(&head).0, 403, "非字面量回环名应走 403：{host}");
+        }
         // ② 带 Origin —— 跨源 fetch/XHR/表单 POST 都带，confirm-sas 是简单请求不触发预检
         let xss = "POST /action/confirm-sas HTTP/1.1\r\nHost: 127.0.0.1:55699\r\n\
                    Origin: http://evil.example\r\nContent-Type: text/plain\r\n\r\n";

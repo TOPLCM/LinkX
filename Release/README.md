@@ -26,16 +26,17 @@ Release/                          （除 Archive 里的 .sha256 之外，下面�
 
 ## 当前版本 0.5.1 的校验值
 
-本表是当前发布产物的校验值；早于本表的任何登记都不再适用。
+本表是**当前构建**的校验值；Releases 页面的上传可能滞后于本表，比对以本表为准。
 从 Releases 页面下载后与下表比对。
 
 | 平台 | 文件 | 大小 (bytes) | SHA-256 |
 |---|---|---|---|
-| Windows | `LinkX-0.5.1-x64.msi` | 630,784 | `3ba9f6ef31519855d5336f84ae9788b997d179e08580f1130474fe11c2d5a89a` |
-| Android | `LinkX-0.5.1-release.apk` | 2,407,710 | `92d3b6bcdee182ae205f8d9825e333c0eb3e92a49f164453ea94b1c78b6e2be8` |
+| Windows | `LinkX-0.5.1-x64.msi` | 634,880 | `4d448113746fa3928215c576c66372411e9c8d974eae2713175c34b3a2ddc9ce` |
+| Android | `LinkX-0.5.1-release.apk` | 2,403,614 | `5ac3a796f416e28db58591e16b70058c3331080d998e492d4f6652f73f6f92b0` |
 
-这一版手机端没有功能改动（只是版本号与前向兼容的 `versionCode` 一起前进），
-因此不另出调试包；需要调试面时按 `Scripts/build-android-apk.sh` 的默认（debug）方式自己构建。
+这一版手机端没有新增可见功能，但**加密核心（会话密钥派生）改在共享的 Rust 层**，
+所以两端必须同批升级：只升一端会在第一条加密消息上解密失败、配对停在未完成。
+调试包（带 AI 控制面，只在本机自测用）不归档不分发，放在 `Release/Debug/`。
 
 MSI 的哈希每次重打包都会变（WiX 把打包时间写进产物），它核对的是同一份文件，不是同一份代码；
 APK 在同样输入下可复现。APK 用测试密钥签名，正式分发需自行重签，重签后哈希会变。
@@ -46,7 +47,7 @@ APK 在同样输入下可复现。APK 用测试密钥签名，正式分发需自
 所以核对的对象是**你从 Releases 页面下载到的那个文件**：
 
 ```powershell
-Get-FileHash -Algorithm SHA256 "$env:USERPROFILE\Downloads\LinkX-0.5.0-x64.msi"
+Get-FileHash -Algorithm SHA256 "$env:USERPROFILE\Downloads\LinkX-0.5.1-x64.msi"
 ```
 
 输出的哈希与上面那张表一致，才算拿到同一个文件。历史版本同理：`.sha256` 校验值在本仓库

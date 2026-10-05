@@ -56,51 +56,6 @@ impl Backoff {
     }
 }
 
-/// QoS 策略（业务消息重传）
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QosClass {
-    /// 应用层 ACK：500ms 首次重传，退避至 4s 上限，最多 3 次后丢弃 + -205
-    Qos2,
-    /// FIN 分块：1s 首次重传，退避至 8s 上限，最多 5 次
-    Qos3,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct QosPolicy {
-    pub first_retry: Duration,
-    pub max_retry: Duration,
-    pub max_attempts: u8,
-    pub drop_error_code: Option<i32>,
-}
-
-impl QosPolicy {
-    pub fn for_class(class: QosClass) -> Self {
-        match class {
-            QosClass::Qos2 => Self {
-                first_retry: Duration::from_millis(500),
-                max_retry: Duration::from_secs(4),
-                max_attempts: 3,
-                drop_error_code: Some(-205),
-            },
-            QosClass::Qos3 => Self {
-                first_retry: Duration::from_secs(1),
-                max_retry: Duration::from_secs(8),
-                max_attempts: 5,
-                drop_error_code: None,
-            },
-        }
-    }
-
-    /// 第 n 次重试对应的退避时长。`n = 0` 不许把 `n - 1` 算成下溢（debug 构建直接 panic，
-    /// 而全 profile `panic = "abort"`）：按"第一次"处理。
-    pub fn retry_delay(&self, n: u32) -> Duration {
-        let base = self.first_retry.as_millis() as u64;
-        let scaled = base << n.saturating_sub(1).min(10);
-        let cap = self.max_retry.as_millis() as u64;
-        Duration::from_millis(scaled.min(cap))
-    }
-}
-
 /// PING/PONG payload（复用 HEARTBEAT 消息类型，由 TLV 区分）
 pub fn ping_payload() -> Vec<u8> {
     tlv_codec::simple(TAG_PING, 0u8.to_be_bytes())
@@ -144,21 +99,6 @@ mod tests {
         b.reset();
         assert!(!b.exhausted());
         assert_eq!(b.next_delay(), Some(Duration::from_secs(1)));
-    }
-
-    #[test]
-    fn qos_retry_delays_capped() {
-        let q2 = QosPolicy::for_class(QosClass::Qos2);
-        assert_eq!(q2.retry_delay(1), Duration::from_millis(500));
-        assert_eq!(q2.retry_delay(2), Duration::from_millis(1000));
-        assert_eq!(q2.retry_delay(4), Duration::from_millis(4000)); // 4s 上限
-        assert_eq!(q2.retry_delay(10), Duration::from_millis(4000)); // 不再增长
-        assert_eq!(q2.drop_error_code, Some(-205));
-
-        let q3 = QosPolicy::for_class(QosClass::Qos3);
-        assert_eq!(q3.retry_delay(1), Duration::from_secs(1));
-        assert_eq!(q3.retry_delay(4), Duration::from_secs(8)); // 1→2→4→8 cap
-        assert_eq!(q3.max_attempts, 5);
     }
 
     #[test]

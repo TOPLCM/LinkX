@@ -204,14 +204,30 @@ close_behavior={}
 }
 
 /// 读取设置（缺失/损坏的键各自回落默认值）
+///
+/// 按字节读 + lossy 解码，不能零容错：默认值是 `clip_sync: true`、`toast_show_content: true`，
+/// 而 `read_to_string` 遇到用户用记事本按 ANSI 存过的文件会整份失败 —— 等于在用户不知情时
+/// 把两个隐私开关打开回去。开关行全是 ASCII，损失解码只伤到中文目录名那一行。
 pub(crate) fn load() -> Settings {
     let mut s = Settings::default();
     let Ok(dir) = crate::identity::data_dir() else {
         return s;
     };
-    let Ok(raw) = fs::read_to_string(dir.join("settings.ini")) else {
+    let path = dir.join("settings.ini");
+    let Ok(bytes) = fs::read(&path) else {
+        // 没有这份文件=第一次启动，安静用默认值；明明有却读不到（权限、被占用）要说一句
+        if path.exists() {
+            crate::say(format!(
+                "设置文件读不出来，这次按默认值运行：{}",
+                path.display()
+            ));
+        }
         return s;
     };
+    let (raw, lossy) = decode_ini(&bytes);
+    if lossy {
+        crate::say("settings.ini 不是 UTF-8（多半是被记事本按 ANSI 存过）：开关按能读出的部分保留，中文目录名可能变成乱码");
+    }
     for line in raw.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -245,9 +261,62 @@ pub(crate) fn load() -> Settings {
     s
 }
 
+/// 原始字节 → 文本；第二个值 = "这不是合法 UTF-8，做了损失解码"。
+/// BOM 不剥的话第一行键名多一个 U+FEFF，那个键就悄悄读不到了。
+fn decode_ini(bytes: &[u8]) -> (std::borrow::Cow<'_, str>, bool) {
+    let body = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF][..]).unwrap_or(bytes);
+    match std::str::from_utf8(body) {
+        Ok(t) => (std::borrow::Cow::Borrowed(t), false),
+        Err(_) => (String::from_utf8_lossy(body), true),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 三种输入：正常 UTF-8、带 BOM、被记事本按 ANSI/GBK 存过。要害是隐私开关不许悄悄变开。
+    #[test]
+    fn ini_decoding_keeps_the_switches_through_bom_and_gbk() {
+        let plain = "clip_sync=0
+toast_show_content=0
+auto_connect=0
+";
+        let (text, lossy) = decode_ini(plain.as_bytes());
+        assert!(!lossy, "正常 UTF-8 不该被标成损失解码");
+        assert!(text.contains("clip_sync=0"), "开关行原样可读");
+
+        // BOM：记事本存 UTF-8 默认带三字节头，不剥掉第一行的键名就废了
+        let mut bomed = vec![0xEF, 0xBB, 0xBF];
+        bomed.extend_from_slice(plain.as_bytes());
+        let (text, lossy) = decode_ini(&bomed);
+        assert!(!lossy, "BOM 不算编码错误");
+        assert!(text.starts_with("clip_sync="), "BOM 没剥掉：{text:?}");
+
+        // GBK：收件目录里有中文，整份文件就不再是合法 UTF-8；开关行必须照样读得出来
+        let mut gbk: Vec<u8> = Vec::new();
+        gbk.extend_from_slice(
+            b"clip_sync=0
+",
+        );
+        gbk.extend_from_slice(
+            b"toast_show_content=0
+",
+        );
+        gbk.extend_from_slice(b"inbox=D:\\");
+        gbk.extend_from_slice(&[0xCFu8, 0xC2, 0xCF, 0xC2]); // "下载" 的 GBK 字节
+        gbk.push(
+            b"
+"[0],
+        );
+        let (text, lossy) = decode_ini(&gbk);
+        assert!(lossy, "GBK 内容要被标成损失解码");
+        assert!(text.contains("clip_sync=0"), "开关行要活下来：{text}");
+        assert!(
+            text.contains("toast_show_content=0"),
+            "第二个隐私开关也要活下来"
+        );
+    }
 
     #[test]
     fn close_behavior_values_round_trip_and_garbage_falls_back_to_ask() {

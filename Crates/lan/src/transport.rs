@@ -64,16 +64,31 @@ fn apply_link_socket_opts(stream: &TcpStream) {
     stream.set_write_timeout(Some(TRANSPORT_WRITE_TIMEOUT)).ok();
 }
 
+/// 主机名形式的地址：解析出的每个 IP 都按同一条连接超时试一遍，全失败时给出最后一个错误。
+fn connect_named(addr: &str) -> std::io::Result<TcpStream> {
+    use std::io::ErrorKind;
+    use std::net::ToSocketAddrs;
+    let mut addrs = addr.to_socket_addrs()?;
+    let mut last = std::io::Error::new(ErrorKind::InvalidInput, "地址解析不出任何 IP");
+    for sa in &mut addrs {
+        match TcpStream::connect_timeout(&sa, TRANSPORT_CONNECT_TIMEOUT) {
+            Ok(s) => return Ok(s),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
 impl TcpStreamLink {
     pub fn connect(addr: &str) -> Result<Self, TransportError> {
         // 带超时的连接：`TcpStream::connect` 挂在 OS 默认的 SYN 重试上（Windows 上可达二十余秒），
         // 而调用方是单条 worker —— 它停摆期间收包、tick、心跳全饿死。`TRANSPORT_CONNECT_TIMEOUT`
         // 早就定义好了却一直没接上，等于写了个假防线。
-        // 地址不是数字形式（手输了主机名）时 `parse` 失败，退回阻塞连接：名字解析要问 DNS，
-        // 这里没有便宜的超时办法，宁可慢也不改变"能填主机名"这件事。
+        // 地址不是数字形式（自检工具里手输了主机名）时先解析再按同一条超时逐个试：解析本身
+        // 要问 DNS、拿不到超时，但 SYN 重试那段不能比 IP 字面量的路径更长。
         let opened = match addr.parse::<std::net::SocketAddr>() {
             Ok(sa) => TcpStream::connect_timeout(&sa, TRANSPORT_CONNECT_TIMEOUT),
-            Err(_) => TcpStream::connect(addr),
+            Err(_) => connect_named(addr),
         };
         match opened {
             Ok(stream) => {

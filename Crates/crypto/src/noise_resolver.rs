@@ -13,8 +13,7 @@ use chacha20poly1305::aead::generic_array::{
 };
 use chacha20poly1305::aead::AeadInPlace;
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit};
-use rand::rngs::OsRng;
-use rand::{CryptoRng, RngCore};
+use rand_core::{CryptoRng, OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use snow::error::Error as SnowError;
 use snow::params::{CipherChoice, DHChoice, HashChoice};
@@ -94,7 +93,7 @@ impl RngCore for OsRandom {
         self.0.fill_bytes(dest)
     }
 
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
         self.0.try_fill_bytes(dest)
     }
 }

@@ -123,8 +123,6 @@ pub(crate) fn enable_dpi_awareness() {
     }
 }
 
-static mut MAIN_HWND: HWND = HWND(std::ptr::null_mut());
-
 static UI_STATE: OnceLock<SharedState> = OnceLock::new();
 
 pub(crate) fn get_instance() -> HINSTANCE {
@@ -258,7 +256,6 @@ pub(crate) fn create_main_window(
             None,
         )
         .ok()?;
-        MAIN_HWND = hwnd;
         theme::apply_caption(hwnd, pref);
         // 拖进窗口的文件 = 待发送路径（与「选择…」同一出口）。这个绑定没有返回值，注册失败无从得知
         // —— 拖放这条入口验收时要真拖一次，不能只看编译过
@@ -413,7 +410,7 @@ fn on_left_click(x: i32, y: i32) {
         return;
     };
     let mut persist = false;
-    // 需要「放锁后」执行的副作用：持锁弹模态框会让 worker 每 200ms 的锁请求全部卡住
+    // 需要「放锁后」执行的副作用（模态框、注册表、跨进程剪贴板）：持锁时 worker 每 200ms 的锁请求全卡住
     let mut sync_debug: Option<bool> = None;
     let mut export_now = false;
     let mut browse_now = false;
@@ -512,12 +509,15 @@ fn on_left_click(x: i32, y: i32) {
             }
         }
         HitTarget::SendLocalClip => {
-            if let Some(text) = crate::clipboard::read_text() {
-                if !text.is_empty() {
-                    st.clip_out = text.clone();
-                    st.send_clip_req = Some(text);
-                }
+            drop(st);
+            let text = crate::clipboard::read_text().filter(|t| !t.is_empty());
+            let Some(arc) = shared_state() else { return };
+            let mut st = arc.lock().unwrap();
+            if let Some(text) = text {
+                st.clip_out = text.clone();
+                st.send_clip_req = Some(text);
             }
+            return;
         }
         HitTarget::CopyNotification(idx) => {
             // 通知仅作查看不够用（验证码/长文需要粘贴）→ 点条目即复制正文到本机剪贴板
@@ -856,12 +856,15 @@ fn album_drag_out(cell: usize) {
     let Some(arc) = shared_state() else {
         return;
     };
-    let id = match arc.lock().unwrap().album.items.get(cell) {
-        Some(item) => item.id,
-        None => {
-            push_error(format!("第 {} 格已经没有照片了，这次拖拽取消", cell + 1));
-            return;
-        }
+    // 取名句要在锁外报错：`match arc.lock().unwrap()...` 的临时守卫活到整个 match 结束，
+    // 而在 match 里调 push_error 就是再去拿同一把不可重入的锁 —— UI 线程当场永久卡死。
+    let id = {
+        let st = arc.lock().unwrap();
+        st.album.items.get(cell).map(|item| item.id)
+    };
+    let Some(id) = id else {
+        push_error(format!("第 {} 格已经没有照片了，这次拖拽取消", cell + 1));
+        return;
     };
     let dir = crate::transfer::album_drag_dir();
     if let Err(e) = std::fs::create_dir_all(&dir) {
@@ -1381,7 +1384,9 @@ fn on_enter(hwnd: HWND) {
     let Some(arc) = shared_state() else {
         return;
     };
-    if arc.lock().unwrap().close_prompt {
+    // 同一条纪律：条件的临时守卫活到 if 块结束，块里再锁就自死锁
+    let close_prompt = arc.lock().unwrap().close_prompt;
+    if close_prompt {
         answer_close_prompt(hwnd, CloseChoice::Minimize);
         return;
     }
@@ -1554,6 +1559,8 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
         }
         WM_TIMER => {
             let toasts = drain_pending_toasts();
+            // 系统媒体卡：本线程就是消息循环所在的那条，卡片状态与按钮派发都在这里
+            crate::smtc::tick();
             // 仅在确有动画或内容变化时重绘，静止时不空转
             let need = toasts
                 || shared_state()
@@ -1599,18 +1606,19 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
         WM_MOUSEWHEEL => {
             // 滚轮一格一行；只有带滚动条的页应答，其余页交给默认处理，免得滚轮被这里整个吃掉
             let delta = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
-            if delta == 0 {
-                return LRESULT(0);
-            }
-            let Some(arc) = shared_state() else {
-                return LRESULT(0);
-            };
-            {
-                let mut st = arc.lock().unwrap();
-                if !render::wheel_scroll_bar(hwnd, &mut st, delta > 0) {
-                    return LRESULT(0);
+            let mut scrolled = false;
+            if delta != 0 {
+                if let Some(arc) = shared_state() {
+                    let mut st = arc.lock().unwrap();
+                    scrolled = render::wheel_scroll_bar(hwnd, &mut st, delta > 0);
+                    if scrolled {
+                        st.ui_rev += 1;
+                    }
                 }
-                st.ui_rev += 1;
+            }
+            if !scrolled {
+                // 说了"交给默认处理"就得真的交回去：返 0 等于把滚轮整个吞掉
+                return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
             }
             let _ = unsafe { InvalidateRect(hwnd, None, true) };
             LRESULT(0)

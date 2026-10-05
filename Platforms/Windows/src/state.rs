@@ -651,6 +651,8 @@ pub(crate) struct UiState {
 
     // ---- 媒体控制 / 手机状态（worker 写状态，UI 写命令）----
     pub media: Option<MediaView>,
+    /// 当前曲目的封面（手机只在局域网通时推来）。按 `track_key` 归属，见 [`UiState::cover_of`]。
+    pub media_cover: Option<MediaCoverView>,
     pub media_cmd_req: Option<(i32, i32, i64)>,
 
     pub battery: Option<BatteryView>,
@@ -664,6 +666,18 @@ pub(crate) struct BatteryView {
     pub charging: bool,
     /// 手机侧产生该读数的时刻（epoch 毫秒）：状态帧走 BLE 还是 TCP 没有顺序保证，只认最新全靠它
     pub at_ms: i64,
+}
+
+/// 一首歌的身份证：包名 + 曲名 + 艺术家。手机端 `MediaControl.pushCover` 用的是同一拼法，
+/// 协议注释里钉死了字段顺序，改这里必须同时改那边。
+pub(crate) fn media_track_key(pkg: &str, title: &str, artist: &str) -> String {
+    format!("{pkg}|{title}|{artist}")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MediaCoverView {
+    pub track_key: String,
+    pub jpeg: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -754,6 +768,7 @@ impl Default for UiState {
             last_applied_clip: String::new(),
             input_focus: FOCUS_NONE,
             media: None,
+            media_cover: None,
             media_cmd_req: None,
             battery: None,
             album: AlbumView {
@@ -780,6 +795,13 @@ pub(crate) type SharedState = Arc<Mutex<UiState>>;
 pub(crate) const LINK_SILENCE_MS: u64 = 25_000;
 
 impl UiState {
+    /// 现在这首歌的封面，**按 key 认领**：对不上就当作没有。宁可卡片没图，也不能拿上一首的图配现在的歌名。
+    pub(crate) fn cover_of_current(&self) -> Option<&MediaCoverView> {
+        let m = self.media.as_ref()?;
+        let c = self.media_cover.as_ref()?;
+        (c.track_key == media_track_key(&m.package, &m.title, &m.artist)).then_some(c)
+    }
+
     /// 「已配对」的唯一判据：**此刻真的能跟那台手机说话**：`paired` 只是"曾经配对成功"的锁存，
     /// 只看它会把"手机已断开"显示成"已配对"；引擎的 `conn_state` 又要等自己的几十秒超时才承认掉线，
     /// 于是再补两条当场看得见的证据：收不到任何帧、对端身份待确认，都算"此刻没连着"

@@ -30,6 +30,7 @@ object Tlv {
     const val TAG_BIND_TAG = 0x33           // channel binding 签名
     const val TAG_FILE_ID = 0x34            // 断点续传文件 id（fixed64）
     const val TAG_RESUME_FROM = 0x35        // 续传起始分块 index（u32）
+    const val TAG_HELLO_SEQ = 0x36          // HELLO 会话序号（u64，区分真重启与迟到重投）
 
     const val OS_ANDROID = 1
     const val OS_WINDOWS = 2

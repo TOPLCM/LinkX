@@ -20,6 +20,12 @@ pub mod pb {
 
 pub use pb as linkx;
 
+/// 一帧封面的 JPEG 字节上限。手机侧自己压到 32 KB，这里留出余量做两端同口径的闸门：
+/// 超了**拒发也拒收**（与剪贴板正文 32 KB 那条一个规矩）。
+pub const MEDIA_COVER_MAX_JPEG: usize = 48 * 1024;
+/// `track_key` 上限：它是「包名|曲名|艺术家」，正常几百字节；再大就不是键而是数据了。
+pub const MEDIA_TRACK_KEY_MAX: usize = 512;
+
 /// 消息类型常量（首发集合，独立于 TLV 常量表）
 pub mod msg_type {
     pub const HELLO: u8 = 0x01;
@@ -65,10 +71,12 @@ pub mod msg_type {
     /// 手机设备状态（电量/充电中）。与媒体状态同一类"手机现在怎么样"的小标量，
     /// 只在变化时发一次，不做周期性心跳。
     pub const DEVICE_STATUS: u8 = 0x82;
+    /// 当前曲目封面：媒体类里唯一有体积的一条，**只走局域网 TCP**，纯蓝牙时不发。
+    pub const MEDIA_COVER: u8 = 0x83;
     pub const ERROR: u8 = 0xFF;
 
     /// 首发支持的完整消息集合（0x01–0x09 握手/配对/身份 + 0x10–0x13 + 0x20/0x30–0x33 +
-    /// 0x60–0x64 + 0x70 + 0x80–0x82 + 0xFF）
+    /// 0x60–0x64 + 0x70 + 0x80–0x83 + 0xFF）
     pub fn is_v1(mt: u8) -> bool {
         matches!(
             mt,
@@ -99,6 +107,7 @@ pub mod msg_type {
                 | MEDIA_STATE
                 | MEDIA_COMMAND
                 | DEVICE_STATUS
+                | MEDIA_COVER
                 | ERROR
         )
     }
@@ -143,6 +152,7 @@ mod tests {
             msg_type::MEDIA_STATE,
             msg_type::MEDIA_COMMAND,
             msg_type::DEVICE_STATUS,
+            msg_type::MEDIA_COVER,
             msg_type::ERROR,
         ];
         for mt in v1 {

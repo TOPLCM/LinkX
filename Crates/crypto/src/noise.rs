@@ -196,6 +196,30 @@ impl NoiseXxHandshake {
             .map_err(|e| NoiseError::Process(format!("{e:?}")))
     }
 
+    /// 取 Noise `Split(ck)` 的两把传输密钥 `(initiator→responder, responder→initiator)`，
+    /// 会话密钥由 [`crate::derive_session_key`] 从它派生。
+    ///
+    /// 为什么必须走这里而不是直接用 [`Self::handshake_hash`]：`h` 是线路字节的链式哈希，
+    /// 谁录到三次握手都能自己重算一遍 —— 它证明"双方看到的是同一次握手"，不证明任何秘密。
+    /// `ck` 才吃进了 es/se 两次 X25519 DH。
+    ///
+    /// 只在握手完成后调用一次：`Split` 会重置内部链式密钥，之后这条握手状态不再参与加解密。
+    pub fn transport_split(
+        &mut self,
+    ) -> Result<([u8; NOISE_KEY_LEN], [u8; NOISE_KEY_LEN]), NoiseError> {
+        if !self.is_done() {
+            return Err(NoiseError::NotComplete);
+        }
+        let (k1, k2) = self.hs.dangerously_get_raw_split();
+        debuglog::log!(
+            Level::Info,
+            "crypto",
+            "noise.split",
+            &[("role", self.role_name())]
+        );
+        Ok((k1, k2))
+    }
+
     /// 完成一次 XX 握手，返回（握手哈希，远程静态公钥）
     pub fn finish(&self) -> Result<([u8; 32], [u8; 32]), NoiseError> {
         let h = self.handshake_hash()?;
@@ -211,11 +235,20 @@ impl NoiseXxHandshake {
     }
 }
 
-/// XX 握手对测结果：
-/// (initiator_hash, responder_hash, initiator_remote_static, responder_remote_static)
-pub type XxPairOutcome = ([u8; 32], [u8; 32], [u8; 32], [u8; 32]);
+/// 一次完整 XX 握手的双端结果。`i_` / `r_` 前缀 = initiator / responder 视角。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct XxPairOutcome {
+    pub i_hash: [u8; 32],
+    pub r_hash: [u8; 32],
+    /// initiator 解出的对端长期公钥（即 responder 的 static）
+    pub i_remote: [u8; 32],
+    pub r_remote: [u8; 32],
+    /// Noise `Split(ck)` 的两把传输密钥——会话密钥的 ikm。双端应当完全相等。
+    pub i_split: ([u8; NOISE_KEY_LEN], [u8; NOISE_KEY_LEN]),
+    pub r_split: ([u8; NOISE_KEY_LEN], [u8; NOISE_KEY_LEN]),
+}
 
-/// 完整一次 XX 握手（内存双端对测 / session 层握手协程复用），返回 [`XxPairOutcome`]
+/// 完整一次 XX 握手（内存双端对测 / 自检用），返回 [`XxPairOutcome`]
 pub fn run_xx_pair(
     i_sk: &[u8; NOISE_KEY_LEN],
     r_sk: &[u8; NOISE_KEY_LEN],
@@ -238,34 +271,121 @@ pub fn run_xx_pair(
     let rh = r.handshake_hash()?;
     let irs = i.remote_static()?; // responder 的长期公钥
     let rrs = r.remote_static()?; // initiator 的长期公钥
-    Ok((ih, rh, irs, rrs))
+    let i_split = i.transport_split()?;
+    let r_split = r.transport_split()?;
+    Ok(XxPairOutcome {
+        i_hash: ih,
+        r_hash: rh,
+        i_remote: irs,
+        r_remote: rrs,
+        i_split,
+        r_split,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{derive_session_key, fingerprint, sas_digits};
-    use rand::RngCore;
+    use crate::{fingerprint, random_bytes, sas_digits};
 
     fn rand_sk() -> [u8; 32] {
-        let mut sk = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut sk);
-        sk
+        random_bytes()
     }
 
     #[test]
     fn xx_pair_derives_shared_secrets() {
         let i_sk = rand_sk();
         let r_sk = rand_sk();
-        let (ih, rh, irs, rrs) = run_xx_pair(&i_sk, &r_sk).unwrap();
+        let out = run_xx_pair(&i_sk, &r_sk).unwrap();
 
-        assert_eq!(ih, rh, "双方握手哈希必须一致");
-        assert_eq!(derive_session_key(&ih), derive_session_key(&rh));
-        assert_eq!(sas_digits(&ih), sas_digits(&rh));
+        assert_eq!(out.i_hash, out.r_hash, "双方握手哈希必须一致");
+        assert_eq!(sas_digits(&out.i_hash), sas_digits(&out.r_hash));
+        assert_eq!(out.i_split, out.r_split, "双方 Split 出的传输密钥必须一致");
 
-        assert_eq!(fingerprint(&irs).len(), 16);
-        assert_eq!(fingerprint(&rrs).len(), 16);
-        assert_ne!(fingerprint(&irs), fingerprint(&rrs));
+        assert_eq!(fingerprint(&out.i_remote).len(), 16);
+        assert_eq!(fingerprint(&out.r_remote).len(), 16);
+        assert_ne!(
+            fingerprint(&out.i_remote),
+            fingerprint(&out.r_remote),
+            "双方的长期身份不能相同"
+        );
+    }
+
+    /// 旁观者视角：录下三次握手的全部线路字节，就能自己重算出握手哈希 `h` —— 所以 `h`
+    /// 不能当密钥材料（0.5.1 之前正是这么做的，等于链路上没有秘密）；而会话密钥现在从
+    /// `Split(ck)` 派生，没有 es/se 的私钥就算不出来。这条测试同时钉住「改回去就红」。
+    #[test]
+    fn eavesdropper_can_recompute_hash_but_not_the_session_key() {
+        use sha2::{Digest, Sha256};
+
+        /// h 只往前推：`h = SHA256(h || 线路片段)`，空片段也要过一次（协议就是这么规定的）
+        fn mix(h: &[u8], part: &[u8]) -> Vec<u8> {
+            let mut n = Sha256::new();
+            n.update(h);
+            n.update(part);
+            n.finalize().to_vec()
+        }
+
+        let mut i = NoiseXxHandshake::new(Role::Initiator, Some(&rand_sk())).unwrap();
+        let mut r = NoiseXxHandshake::new(Role::Responder, Some(&rand_sk())).unwrap();
+        let m1 = i.write_message(&[]).unwrap();
+        r.read_message(&m1).unwrap();
+        let m2 = r.write_message(&[]).unwrap();
+        i.read_message(&m2).unwrap();
+        let m3 = i.write_message(&[]).unwrap();
+        r.read_message(&m3).unwrap();
+
+        let h_i = i.handshake_hash().unwrap();
+        let h_r = r.handshake_hash().unwrap();
+        assert_eq!(h_i, h_r);
+
+        // XX 的线路形状（DH=32B 公钥，TAG=16B AEAD tag）：
+        // msg1 = e_i；msg2 = e_r || 加密的 s_r || 空 payload 的 tag；msg3 = 加密的 s_i || tag
+        const DH: usize = 32;
+        const TAG: usize = 16;
+        assert_eq!(m1.len(), DH);
+        assert_eq!(m2.len(), 2 * (DH + TAG));
+        assert_eq!(m3.len(), DH + 2 * TAG);
+
+        // 逐 token 重放：E 段是明文公钥，S 段是密文+tag，空 payload 也占一个 tag，
+        // 全都躺在链路上；DH 段只推进链式密钥 ck（那才是秘密），不进 h。
+        let mut h = Sha256::digest(NOISE_PROTOCOL.as_bytes()).to_vec(); // 初始 h=协议名，再过一遍空 prologue
+        for seg in [
+            &m1[..],
+            &[][..], // msg1 时尚无密钥，空 payload 不占字节
+            &m2[..DH],
+            &m2[DH..2 * DH + TAG],
+            &m2[2 * DH + TAG..],
+            &m3[..DH + TAG],
+            &m3[DH + TAG..],
+        ] {
+            h = mix(&h, seg);
+        }
+        assert_eq!(
+            h_i,
+            <[u8; 32]>::try_from(&h[..32]).unwrap(),
+            "h 只由线路字节决定：录到包就能算出来"
+        );
+
+        // 双端各自派生的会话密钥一致
+        let ki = i.transport_split().unwrap();
+        let kr = r.transport_split().unwrap();
+        assert_eq!(ki, kr, "双方 Split 出的传输密钥必须一致");
+        let key_i = crate::derive_session_key(&h_i, (&ki.0, &ki.1));
+        let key_r = crate::derive_session_key(&h_r, (&kr.0, &kr.1));
+        assert_eq!(key_i, key_r, "两端必须算出同一把会话密钥");
+
+        // 拿着同一个 h、却没有 DH 秘密的人派生不出它
+        assert_ne!(
+            key_i,
+            crate::derive_session_key(&h_i, (&[0u8; 32], &[0u8; 32]))
+        );
+        // 旧公式（ikm = h）也不等于新密钥：谁把派生改回去，这条就红
+        use hkdf::Hkdf;
+        let hk = Hkdf::<sha2::Sha256>::new(Some(b"linkx/v1"), &h_i);
+        let mut old = [0u8; 32];
+        hk.expand(b"session-key", &mut old).unwrap();
+        assert_ne!(key_i, old, "会话密钥不得再等于「只用握手哈希」的旧派生");
     }
 
     #[test]

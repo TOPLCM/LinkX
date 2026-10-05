@@ -1,6 +1,7 @@
 package com.linkx.app
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.media.AudioManager
 import android.media.MediaMetadata
 import android.media.session.MediaController
@@ -41,6 +42,10 @@ object MediaControl {
     /** 排队中的指令上限：对端疯狂刷按钮时宁可明确丢弃，也不能把队列堆到无界。 */
     private const val MAX_PENDING_CMDS = 8
 
+    /** 封面边长与字节上限：压不进上限就当作"这首没封面"，不把窄口当文件通道用。 */
+    private const val COVER_MAX_PX = 200
+    private const val COVER_MAX_BYTES = 32 * 1024
+
     private val busy = AtomicBoolean(false)
     private val pendingCmds = AtomicInteger(0)
     private val pool by lazy {
@@ -50,6 +55,7 @@ object MediaControl {
     private var lastAt = 0L
     private var lastPushAt = 0L
     private var lastSignature = ""
+    private var coverSentKey = ""
 
     /** 最近一次成功推出去的内容（控制面与 UI 据此判断"到底有没有在采样"）。 */
     @Volatile
@@ -171,11 +177,66 @@ object MediaControl {
             lastPushAt = nowMs
             lastSent = "$pkg|$title"
             lastSkip = ""
+            // 状态先落地再补封面：电脑拿 track_key 认图，顺序反了就会把上一首的图配这一首的歌名
+            pushCover(pkg, title, artist, md)
         } else {
             // false 有两种成因：未配对，或 JNI 调用没成功（.so 缺符号）。措辞必须覆盖两者，否则排查被带偏。
             lastSkip = "推送被拒：未配对，或 native 调用失败（见 logcat nativeSendMediaState）"
         }
     }
+
+    /**
+     * 局域网刚通：清掉"这首已经交代过"的记号，下一轮采样就会把当前曲目的封面补发一次。
+     * 电脑重启或重新配对之后手上是没有封面的，不补就要等用户切歌。
+     */
+    fun onLanUp() {
+        coverSentKey = ""
+    }
+
+    /**
+     * 推当前曲目的封面。**只在局域网通时推**（纯蓝牙传几十 KB 会挤掉通知与剪贴板，引擎也会直接拒收），
+     * 同一首只推一次：`coverSentKey` 记的是"已经交代过的那首"，无论它当时有没有封面。
+     */
+    private fun pushCover(pkg: String, title: String, artist: String, md: MediaMetadata?) {
+        val key = "$pkg|$title|$artist"
+        if (key == coverSentKey || !LinkxRuntime.tcpBound) return
+        val bmp = md?.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
+            ?: md?.getBitmap(MediaMetadata.METADATA_KEY_ART)
+        val jpeg = bmp?.let { encodeCover(it) }
+        if (jpeg == null) {
+            // 这首就是没封面（或压不进上限）：记下来，别每轮重编一次
+            coverSentKey = key
+            return
+        }
+        if (LinkxRuntime.sendMediaCover(key, jpeg, System.currentTimeMillis())) {
+            Log.i(TAG, "cover.sent ${bmp.width}x${bmp.height} ${jpeg.size}B")
+            coverSentKey = key
+        }
+    }
+
+    /** 缩到 [COVER_MAX_PX] 边长以内再压 JPEG，质量逐级降直到不超过 [COVER_MAX_BYTES]。 */
+    private fun encodeCover(src: Bitmap): ByteArray? {
+        val side = maxOf(src.width, src.height)
+        val scaled = if (side <= COVER_MAX_PX) src else {
+            val k = COVER_MAX_PX.toFloat() / side
+            Bitmap.createScaledBitmap(src, (src.width * k).toInt().coerceAtLeast(1),
+                (src.height * k).toInt().coerceAtLeast(1), true)
+        }
+        // 缩放出来那张是 native 内存（一首 1000×1000 的图 ≈ 4 MB），不回收就得等 GC 才肯放手
+        val recycled = scaled !== src
+        try {
+            val out = java.io.ByteArrayOutputStream(COVER_MAX_BYTES)
+            for (q in intArrayOf(80, 60, 40)) {
+                out.reset()
+                scaled.compress(Bitmap.CompressFormat.JPEG, q, out)
+                if (out.size() <= COVER_MAX_BYTES) return out.toByteArray()
+            }
+            return if (out.size() <= COVER_MAX_BYTES) out.toByteArray() else null
+        } finally {
+            if (recycled) scaled.recycle()
+        }
+    }
+
 
     /** 执行指令，返回给控制面/日志的说明。动作码与 `Proto/linkx/v1/media.proto` 的 `MediaCommand.Action` 一一对应。 */
     private fun handleCommand(ctx: Context, action: Int, volume: Int, deltaMs: Long): String {

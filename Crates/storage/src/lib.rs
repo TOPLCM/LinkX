@@ -121,8 +121,10 @@ impl LinkxStore {
     pub fn get_device_identity(&self) -> Result<Option<DeviceIdentity>, StoreError> {
         self.conn
             .query_row(
+                // 身份轮换会写入新的 device_id，旧行仍在：不带 ORDER BY 的 LIMIT 1 让 SQLite
+                // 随便挑一行，那等于随机决定"本机是谁"。按建号时间取最新的那条。
                 "SELECT device_id, long_term_pk, fingerprint, device_name, os, version, created_at
-                 FROM device_identity LIMIT 1",
+                 FROM device_identity ORDER BY created_at DESC, rowid DESC LIMIT 1",
                 [],
                 |row| {
                     Ok(DeviceIdentity {
@@ -439,6 +441,38 @@ mod tests {
         store.upsert_device_identity(&d).unwrap();
         let back = store.get_device_identity().unwrap().unwrap();
         assert_eq!(back, d);
+    }
+
+    /// 身份轮换写入的是**新的 device_id**，旧行不会被 REPLACE 掉。读取端必须确定性地拿到最新
+    /// 那一份，而不是让 SQLite 随便挑一行 —— 那等于随机决定"本机是谁"。
+    #[test]
+    fn rotated_identity_reads_the_newest_row() {
+        let store = LinkxStore::open_in_memory().unwrap();
+        let old = DeviceIdentity {
+            device_id: [0x01; 8].to_vec(),
+            long_term_pk: [0x77; 32].to_vec(),
+            fingerprint: "0000000000000001".into(),
+            device_name: "pc-home".into(),
+            os: 0,
+            version: "0.5.0".into(),
+            created_at: 1_000,
+        };
+        store.upsert_device_identity(&old).unwrap();
+        let mut fresh = old.clone();
+        fresh.device_id = [0x02; 8].to_vec();
+        fresh.fingerprint = "0000000000000002".into();
+        fresh.created_at = 2_000;
+        store.upsert_device_identity(&fresh).unwrap();
+        assert_eq!(
+            store.get_device_identity().unwrap().unwrap(),
+            fresh,
+            "读到的应是轮换后的身份"
+        );
+        // 反序写入（新的先写、旧的后写）也必须读最新的那一条：判据是 created_at，不是插入顺序
+        let store2 = LinkxStore::open_in_memory().unwrap();
+        store2.upsert_device_identity(&fresh).unwrap();
+        store2.upsert_device_identity(&old).unwrap();
+        assert_eq!(store2.get_device_identity().unwrap().unwrap(), fresh);
     }
 
     #[test]

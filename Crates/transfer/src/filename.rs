@@ -161,6 +161,48 @@ mod tests {
         assert_eq!(win("  "), "_");
     }
 
+    /// fuzz 目标 `sanitize_filename` 那几条不变量的可跑版本：这条路径吃的是对端写来的字符串，
+    /// 改名式（永不拒绝）意味着它是收件目录唯一的护栏。
+    #[test]
+    fn sanitizer_keeps_every_input_inside_one_path_segment() {
+        let long_cjk = "非常长的中文文件名".repeat(20);
+        let long_ascii = "a".repeat(300);
+        let tail_dots = "a".to_string() + &".".repeat(300);
+        let corpus = [
+            "",
+            " ",
+            ".",
+            "..",
+            "/",
+            "\\",
+            "../..",
+            "….\\..\\windows\\system32",
+            "con",
+            "CON.TXT",
+            "report:a.txt",
+            "a  ",
+            "b.",
+            "\u{0}x",
+            "\u{7}bell",
+            &long_cjk,
+            &long_ascii,
+            &tail_dots,
+        ];
+        for raw in corpus {
+            for rules in [Rules::Windows, Rules::Fat] {
+                let out = sanitize(raw, rules);
+                assert!(
+                    !out.contains('/') && !out.contains('\\'),
+                    "{raw:?} → {out:?}"
+                );
+                assert!(out != "." && out != "..", "{raw:?} → {out:?}");
+                assert!(out.len() <= MAX_LEN, "{raw:?} → {} 字节", out.len());
+                assert!(!out.is_empty(), "{raw:?} 不该交出空名字");
+                assert_eq!(sanitize(&out, rules), out, "净化不自幂：{raw:?}");
+            }
+        }
+    }
+
     #[test]
     fn sanitize_is_total_and_valid() {
         for name in [

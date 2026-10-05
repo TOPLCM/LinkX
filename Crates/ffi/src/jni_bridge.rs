@@ -9,7 +9,7 @@
 //! 16 FileTaskFailed `u64 id|u16 reason`；17 FileTaskCancelled 同 16（**取消不是失败**，收端据此删残留文件）；18 AlbumListReq `u32 page|u32 per_page`；
 //! 19 AlbumThumbReq `u64 id|u32 edge`；20 AlbumFullReq `u32 count|count × u64 id`（count ≤ 256）；
 //! 21 NotifyReplyReq `u32 reply_id|i32 notification_id|i32 action_index|u16 pkg|u16 tag|u16 result_key|u16 text`。21 以下已占用，新事件从 22 起加。
-//! 手机是生产者的 `MediaState`/`DeviceStatus`/回复回执 **故意不编码**——Android 收不到自己发出的东西；取消收尾（FILE_DONE{cancelled:true}）不另发 kind 9：引擎在解码处就转成 17。
+//! 手机是生产者的 `MediaState`/`MediaCover`/`DeviceStatus`/回复回执 **故意不编码**——Android 收不到自己发出的东西；取消收尾（FILE_DONE{cancelled:true}）不另发 kind 9：引擎在解码处就转成 17。
 
 use std::collections::HashSet;
 // 仅调试控制面用到；不带 feature 的交付构建里它们没有使用者，单列 cfg 以免 unused import。
@@ -24,8 +24,8 @@ use jni::objects::{JByteArray, JClass, JString};
 use jni::sys::{jboolean, jbyteArray, jint, jlong, jstring};
 use jni::JNIEnv;
 use linkx_protocol::pb::{
-    AlbumItem, AlbumList, AlbumThumb, DeviceStatus, FileMeta, MediaState, NotificationDismiss,
-    NotificationPush, NotificationReplyAck,
+    AlbumItem, AlbumList, AlbumThumb, DeviceStatus, FileMeta, MediaCover, MediaState,
+    NotificationDismiss, NotificationPush, NotificationReplyAck,
 };
 use linkx_session::engine::{EngineConfig, EngineEvent, EngineRole, SessionEngine};
 
@@ -543,14 +543,17 @@ fn encode_event(out: &mut Vec<u8>, ev: &EngineEvent) {
             put_str(&mut body, reason);
         }
         EngineEvent::ConfigReceived { entries } => {
+            // 流对齐不变式：一条事件要么完整写进流，要么整条丢弃（与函数末尾"事件总长超
+            // u16 就 return"同一条口径）。只跳过条目而留下 kind 字节，Kotlin 会把后续事件
+            // 的字节当作这条的字段读，从此整条事件流错位。
             body.push(13);
-            // 条目数超 u16 直接丢弃该事件（保持流对齐）
-            if put_u16(&mut body, entries.len()).is_ok() {
-                for e in entries {
-                    put_str(&mut body, &e.key);
-                    put_str(&mut body, &e.value);
-                    put_str(&mut body, &e.scope);
-                }
+            if put_u16(&mut body, entries.len()).is_err() {
+                return;
+            }
+            for e in entries {
+                put_str(&mut body, &e.key);
+                put_str(&mut body, &e.value);
+                put_str(&mut body, &e.scope);
             }
         }
         // 同名设备呈递新身份 → UI 必须弹「重新配对确认」
@@ -568,6 +571,7 @@ fn encode_event(out: &mut Vec<u8>, ev: &EngineEvent) {
         // 这里不用 `_ =>` 兜底：将来给 EngineEvent 加变体时，漏写编码要在编译期
         // 暴露出来，而不是悄悄变成"事件发了但对端解不出来"。
         EngineEvent::MediaState { .. } => return,
+        EngineEvent::MediaCover { .. } => return,
         EngineEvent::DeviceStatus { .. } => return,
         // 电脑下发的播放控制指令 → Kotlin 侧交给 MediaControl 执行
         EngineEvent::MediaCommand {
@@ -793,6 +797,33 @@ pub extern "system" fn Java_com_linkx_app_NativeCore_nativeSendMediaState(
             ts_ms,
         };
         with_engine(handle, |e| e.send_media_state(&s, ts_ms)).unwrap_or(false)
+    }))
+    .unwrap_or(false);
+    jint::from(sent as u8)
+}
+
+/// 推送当前曲目封面（手机 → 电脑）。`track_key` 是"这张图属于哪首歌"的凭据，
+/// 与 `nativeSendMediaState` 的 package/title/artist 三段同口径拼接；局域网未绑定时
+/// 引擎直接拒发（返回 0），调用方不必自己判断链路。
+#[no_mangle]
+pub extern "system" fn Java_com_linkx_app_NativeCore_nativeSendMediaCover(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    track_key: JString<'_>,
+    jpeg: JByteArray<'_>,
+    ts_ms: jlong,
+) -> jint {
+    let sent = catch_unwind(AssertUnwindSafe(|| -> bool {
+        let (Ok(key), Ok(bytes)) = (env.get_string(&track_key), env.convert_byte_array(&jpeg))
+        else {
+            return false;
+        };
+        let c = MediaCover {
+            track_key: key.to_string_lossy().into_owned(),
+            jpeg: bytes.into(),
+        };
+        with_engine(handle, |e| e.send_media_cover(&c, ts_ms)).unwrap_or(false)
     }))
     .unwrap_or(false);
     jint::from(sent as u8)
@@ -1799,5 +1830,30 @@ mod tests {
             "已释放句柄必须被拒（防 UAF）"
         );
         assert!(!live_handles().lock().unwrap().remove(&raw));
+    }
+
+    /// kind 13（配置同步）条目数超 u16 时必须**整条丢弃**。只写 kind 字节而不写计数体，
+    /// Kotlin 会把下一条事件的字节当作这条的字段读，整条事件流从此错位——这类错位不崩，
+    /// 只是每个后续事件都长错样子，真机上极难归因。
+    #[test]
+    fn oversized_config_event_is_dropped_whole_not_half_written() {
+        let entries = (0..(usize::from(u16::MAX) + 1))
+            .map(|i| linkx_session::engine::ConfigEntryItem {
+                key: format!("k{i}"),
+                value: String::new(),
+                scope: "cross".into(),
+            })
+            .collect();
+        let mut out = Vec::new();
+        encode_event(&mut out, &EngineEvent::ConfigReceived { entries });
+        assert!(
+            out.is_empty(),
+            "超限的配置事件一个字节都不该写进流：{out:?}"
+        );
+
+        // 紧接着的一条正常事件必须从头就完整（证明上一条没留下半截头）
+        let mut out2 = Vec::new();
+        encode_event(&mut out2, &EngineEvent::TcpBound);
+        assert_eq!(out2, vec![0x00, 0x01, 11], "后续事件应保持自身格式");
     }
 }

@@ -34,6 +34,8 @@ pub mod tlv {
     pub const TAG_BIND_TAG: u8 = 0x33; // channel binding 签名
     pub const TAG_FILE_ID: u8 = 0x34; // 断点续传：文件 id（fixed64，8B 大端）
     pub const TAG_RESUME_FROM: u8 = 0x35; // 断点续传：起始分块 index（u32，4B 大端）
+    pub const TAG_HELLO_SEQ: u8 = 0x36; // HELLO：本引擎实例的随机序号（u64，8B 大端）
+                                        // 用来区分「对端真重启」与「上一条 HELLO 迟到重投」
 
     // ---- 通道/状态常量 ----
     pub const OS_ANDROID: u8 = 1;

@@ -75,8 +75,7 @@ pub(crate) fn load_or_create_static_key() -> Result<[u8; 32], String> {
     }
 
     // 3) 首次运行：生成并加密落盘
-    let mut sk = [0u8; 32];
-    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut sk);
+    let sk = linkx_crypto::random_bytes::<32>();
     fs::create_dir_all(&dir).map_err(|e| format!("创建数据目录失败: {e}"))?;
     write_protected(&enc_path, &sk).map_err(|e| format!("身份私钥加密落盘失败: {e}"))?;
     Ok(sk)

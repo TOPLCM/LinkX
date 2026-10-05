@@ -20,6 +20,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 linkx-protocol = { path = "../../Crates/protocol" }
 linkx-crypto = { path = "../../Crates/crypto" }
+linkx-transfer = { path = "../../Crates/transfer" }
 prost = "0.12.6"
 
 [profile.release]
@@ -43,6 +44,20 @@ bench = false
 [[bin]]
 name = "noise_handshake_parser"
 path = "fuzz_targets/noise_handshake_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sanitize_filename"
+path = "fuzz_targets/sanitize_filename.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_resume"
+path = "fuzz_targets/decode_resume.rs"
 test = false
 doc = false
 bench = false

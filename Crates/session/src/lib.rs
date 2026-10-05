@@ -14,9 +14,7 @@ pub use engine::{
     ConfigEntryItem, EngineConfig, EngineEvent, EngineRole, IncomingChunk, SessionEngine,
     TrustedPeer,
 };
-pub use heartbeat::{
-    is_ping, is_pong, ping_payload, pong_payload, Backoff, HeartbeatSpec, QosClass, QosPolicy,
-};
-pub use pairing::{PairConfirm, PairConfirmError, PairDoneError, PairFlow};
+pub use heartbeat::{is_ping, is_pong, ping_payload, pong_payload, Backoff, HeartbeatSpec};
+pub use pairing::{PairConfirm, PairFlow};
 pub use state::{SessionChannel, SessionEvent, SessionManager, SessionState, TofuVerdict};
 pub use trust::{is_valid_fingerprint, parse_tsv, to_tsv, upsert, FINGERPRINT_HEX_LEN};

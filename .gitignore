@@ -44,3 +44,6 @@ Release/Archive/**/LinkX-*.idsig
 
 # 导出公开副本时留在副本里的时间戳（本机状态，不是仓库内容）
 .export-public.stamp
+
+# 会话临时工作区（脚本输出、取证快照），不入库
+.scratch/

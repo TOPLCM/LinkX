@@ -56,7 +56,7 @@ for s in check-compose-kotlin-pair check-protocol-sync check-crypto-audit \
 done
 ```
 
-六道门禁各管什么：
+七道门禁各管什么：
 
 | 脚本 | 拦的是什么 |
 |---|---|
@@ -66,6 +66,7 @@ done
 | `check-compose-kotlin-pair.sh` | Compose 与 Kotlin 版本不配对（"编译过但出包才炸"） |
 | `check-comment-hygiene.sh` | 源码里出现内部编号、注释占比与连续块超长 |
 | `check-release-clean.sh` | 交付产物里残留调试控制面（依赖图闸门 + 字节扫描） |
+| `check-install-single.sh` | 装完之后注册表里只有一份 LinkX，不分叉 |
 
 `check-release-clean.sh` 的用法与它为什么还要**反向断言产品符号必须存在**，
 写在 [`Debug-Plane.md`](Debug-Plane.md) 第 7 节。

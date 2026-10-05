@@ -64,13 +64,20 @@ fi
 # 基线文件路径可用 DOC_BASE 覆盖；读不到就如实失败，不能把"文件不在/没读到"读成"没问题"。
 if [ "${1:-}" = "--require-docs" ]; then
   DOC_BASE="${DOC_BASE:-Docs/Memory/01-ProjectBase.md}"
-  [ -f "$DOC_BASE" ] || die "文档基线 $DOC_BASE 不存在（--require-docs 需要它；用 DOC_BASE=<文件> 指定）"
-  DOCVER="$(sed -n 's/^- \*\*\([0-9][0-9]*\.[0-9]*\.[0-9]*\)\*\*.*/\1/p' "$DOC_BASE" | head -1)"
-  [ -n "$DOCVER" ] || die "$DOC_BASE 里读不到形如「- **x.y.z**」的版本行（基线格式变了）"
-  if [ "$DOCVER" = "$VERSION" ]; then
-    ok "ProjectBase 当前交付版本 = $DOCVER"
+  if [ -f "$DOC_BASE" ]; then
+    DOCVER="$(sed -n 's/^- \*\*\([0-9][0-9]*\.[0-9]*\.[0-9]*\)\*\*.*/\1/p' "$DOC_BASE" | head -1)"
+    [ -n "$DOCVER" ] || die "$DOC_BASE 里读不到形如「- **x.y.z**」的版本行（基线格式变了）"
   else
-    die "ProjectBase 当前交付版本=$DOCVER 与 Cargo.toml=$VERSION 不一致（出包前必须对齐）"
+    # 内部基线只在本机有，公开仓库里没有它。退回查 CHANGELOG 的第一段版本——
+    # 那才是读者能看到的东西，缺文件不等于跳过检查。
+    DOC_BASE=CHANGELOG.md
+    DOCVER="$(sed -n 's/^## \([0-9][0-9]*\.[0-9]*\.[0-9]*\).*/\1/p' "$DOC_BASE" | head -1)"
+    [ -n "$DOCVER" ] || die "既没有 Docs/Memory 里的内部基线，也没在 $DOC_BASE 读到「## x.y.z」"
+  fi
+  if [ "$DOCVER" = "$VERSION" ]; then
+    ok "$DOC_BASE 当前交付版本 = $DOCVER"
+  else
+    die "$DOC_BASE 当前交付版本=$DOCVER 与 Cargo.toml=$VERSION 不一致（出包前必须对齐）"
   fi
   for f in Release/Windows/LinkX-$VERSION-x64.msi Release/Android/LinkX-$VERSION-release.apk; do
     [ -f "$f" ] || die "缺少交付产物 $f"
