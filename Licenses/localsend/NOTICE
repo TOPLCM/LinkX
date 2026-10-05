@@ -1,0 +1,39 @@
+LinkX — third-party notice: LocalSend core
+==========================================
+
+This product includes a port of software developed at the LocalSend project
+(https://github.com/localsend/localsend).
+
+Copyright 2022-2026 Tien Do Nam and LocalSend contributors.
+
+Licensed under the Apache License, Version 2.0 (the "License").
+The license text is shipped with this product at `Licenses/localsend/LICENSE`
+and is available at https://www.apache.org/licenses/LICENSE-2.0 .
+
+What of LocalSend is actually in LinkX (as of 2026-09-30):
+  only the receive-side filename rules, ported into
+  `Crates/transfer/src/filename.rs` — the single source of truth for turning a
+  peer-supplied file name into a safe on-disk name.
+  The vendored upstream tree (`Crates/vendor/localsend/`, 60 files) and the
+  never-wired interop layer (`Crates/transfer/src/ls_interop.rs`) have been
+  removed from this repository: real development never used them. `Cargo.lock`
+  dropped from 287 to 160 crates and no longer contains tokio / hyper /
+  reqwest / rustls.
+
+Provenance (Apache-2.0 §4):
+  upstream repository : https://github.com/localsend/localsend
+  upstream path       : packages/core
+  upstream commit     : e768240d1ad95f0f162b852b5ff37bec71cde1ef
+
+Modifications (Apache-2.0 §4(b)):
+  The change statement lives in `Licenses/localsend/PORTING.md`. It records
+  both what the removed vendored copy changed relative to upstream and how the
+  ported filename rules differ (Hfs/Posix rule sets and Options dropped;
+  reserved device names are prefixed rather than replaced). No upstream source
+  file carries a copyright header, so there is nothing to retain per §4(d)
+  beyond this NOTICE and the `LICENSE` copy.
+
+Trademarks (Apache-2.0 §6):
+  This license does not grant permission to use the trade names, trademarks,
+  service marks, or product names of the upstream project. LinkX is not
+  LocalSend and must not present itself as such.

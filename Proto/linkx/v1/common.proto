@@ -1,0 +1,11 @@
+// LinkX 通用信封（外层包明文结构）
+// msg_id: uint128 -> bytes(16)，ts: int64 UTC ms，src: bytes(8) device_id，body: message-specific
+syntax = "proto3";
+package linkx.v1;
+
+message Envelope {
+  bytes msg_id = 1;     // 16B uint128
+  int64 ts_ms = 2;      // UTC 毫秒
+  bytes src = 3;        // 8B 源设备 id
+  bytes body = 4;       // 消息体（由 msg type 决定，不嵌套）
+}

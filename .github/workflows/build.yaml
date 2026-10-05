@@ -1,0 +1,165 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+          targets: x86_64-pc-windows-gnu, aarch64-linux-android
+          # rustfmt / clippy 不是 rustc 自带的组件，要显式安装。
+          components: rustfmt, clippy
+      # 协议 crate 的 build.rs 会现场编译 Proto/*.proto，需要系统 protoc。
+      - name: protoc 21.12
+        run: |
+          curl -sSL -o /tmp/protoc.zip             https://github.com/protocolbuffers/protobuf/releases/download/v21.12/protoc-21.12-linux-x86_64.zip
+          unzip -q /tmp/protoc.zip -d /tmp/protoc
+          echo "PROTOC=/tmp/protoc/bin/protoc" >> $GITHUB_ENV
+          /tmp/protoc/bin/protoc --version
+      - name: 格式检查
+        run: cargo fmt --all -- --check
+      - name: 静态检查（clippy，告警即失败，含测试代码）
+        # 这三个 crate 在 Linux 上测不出可靠结论，改由 windows-host-tests 在真 Windows 上补 lint：
+        # linkx-windows 的 Win32 绑定只能在 Windows 目标编译；
+        # linkx-storage / linkx-app 依赖 bundled SQLite，交叉编译需要额外的 C 工具链。
+        run: cargo clippy --workspace --exclude linkx-windows --exclude linkx-storage --exclude linkx-app --all-targets -- -D warnings
+      - name: 单元测试（共享核心）
+        run: cargo test --workspace --exclude linkx-windows
+      # 源码里不许出现内部编号（公开仓库的读者没有那份台账），注释占比与连续注释块也有上限。
+      - name: 注释卫生
+        run: bash Scripts/check-comment-hygiene.sh
+      - name: 版本同步（防"漏改某一处"）
+        run: bash Scripts/check-version-sync.sh
+      - name: 协议一致性
+        run: bash Scripts/check-protocol-sync.sh
+      - name: 加密选型审计
+        run: bash Scripts/check-crypto-audit.sh
+      - name: Compose/Kotlin 版本配对
+        run: bash Scripts/check-compose-kotlin-pair.sh
+      - name: buf lint（需 protoc）
+        run: |
+          bash <(curl -sSL https://github.com/bufbuild/buf/install.sh 'v1.32.1') --yes
+          buf lint Proto
+  windows-shell:
+    runs-on: ubuntu-latest
+    needs: core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+          targets: x86_64-pc-windows-gnu
+      - run: sudo apt-get update && sudo apt-get install -y mingw-w64
+      - name: 交叉编译 Windows 壳
+        run: cargo build --release --target x86_64-pc-windows-gnu --manifest-path Platforms/Windows/Cargo.toml
+      # 交付产物里不许有调试控制面。本 job 出的正是不带 agent-debug 的那个 exe。
+      - name: 交付构建零调试残留
+        run: bash Scripts/check-release-clean.sh Target/x86_64-pc-windows-gnu/release/linkx.exe
+  android:
+    runs-on: ubuntu-latest
+    needs: core
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust 工具链 + aarch64-linux-android
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+          targets: aarch64-linux-android
+      - name: cargo-ndk（把 Rust 核心打成安卓 .so）
+        run: cargo install cargo-ndk --version 4.1.2 --locked
+      - name: Android NDK r27c
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          add-to-path: false
+      # 关键：先产出 liblinkx_core.so，否则 NativeCore.loadLibrary 在运行时崩溃
+      - name: 构建 Rust Core .so（arm64-v8a）
+        run: bash Scripts/build-android-core.sh
+      - name: Gradle 8.7 + AGP
+        uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 21 }
+      - uses: gradle/actions/setup-gradle@v3
+        with: { gradle-version: 8.7 }
+      - run: |
+          echo "sdk.dir=$ANDROID_HOME" > Platforms/Android/local.properties || true
+          (cd Platforms/Android && gradle -p . assembleDebug --no-daemon)
+      - name: 校验 APK 已打包 liblinkx_core.so
+        run: |
+          APK="$(find Platforms/Android -name '*.apk' | head -1)"
+          [ -n "$APK" ] || { echo "❌ 未找到 APK"; exit 1; }
+          unzip -l "$APK" | grep -q 'lib/arm64-v8a/liblinkx_core.so' \
+            || { echo "缺少 lib/arm64-v8a/liblinkx_core.so"; exit 1; }
+          echo "✅ APK 内含 liblinkx_core.so: $APK"
+      # 安卓交付物是唯一带 JNI 调试符号面的产物，这道检查必须在 CI 上跑。
+      - name: 交付构建零调试残留（APK 内 .so）
+        run: |
+          APK="$(find Platforms/Android -name '*.apk' | head -1)"
+          bash Scripts/check-release-clean.sh --apk-so "$APK"
+      - name: compose/kotlin 版本配对
+        run: bash Scripts/check-compose-kotlin-pair.sh
+      - name: 版本同步
+        run: bash Scripts/check-version-sync.sh
+  # ── 平台差异门禁───────────────────────────────────────────
+  # 有些缺陷只在 Windows 成立（Winsock 对「缓冲小于数据报」返回 WSAEMSGSIZE 并消费该包、
+  # FILETIME 只有 100ns 粒度），交叉编译拦不住，必须由真实 Windows runner 跑单测。
+  windows-host-tests:
+    runs-on: windows-latest
+    needs: core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+          targets: x86_64-pc-windows-gnu, aarch64-linux-android
+      - name: protoc 21.12（prost-build 不内置 protoc，缺则 build.rs panic；版本与本机一致）
+        run: |
+          Invoke-WebRequest -OutFile protoc.zip `
+            https://github.com/protocolbuffers/protobuf/releases/download/v21.12/protoc-21.12-win64.zip
+          Expand-Archive protoc.zip -DestinationPath "$PWD\protoc"
+          "PROTOC=$PWD\protoc\bin\protoc.exe" >> $env:GITHUB_ENV
+          & "$PWD\protoc\bin\protoc.exe" --version
+      # 不排除 linkx-windows：msvc 宿主上壳的单测可跑，正是要拦的那类平台语义所在地。
+      - name: 全量单测（含 Windows 壳）
+        run: cargo test --workspace
+      # 共享核心的 clippy 在 Linux 上做，壳与自检程序在这台真 Windows 上补。
+      - name: 静态检查 Windows 壳与自检程序（clippy）
+        run: cargo clippy -p linkx-windows -p linkx-storage -p linkx-app --all-targets -- -D warnings
+  # ── JNI 门禁──────────────────────────────────────────────
+  # linkx-ffi 的 jni feature 不在默认构建里；单独编译并测一次，免得只在发版前人肉发现。
+  jni-gate:
+    runs-on: ubuntu-latest
+    needs: core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+          components: clippy
+      - name: protoc 21.12（显式安装，不依赖 runner 镜像自带）
+        run: |
+          curl -sSL -o /tmp/protoc.zip \
+            https://github.com/protocolbuffers/protobuf/releases/download/v21.12/protoc-21.12-linux-x86_64.zip
+          unzip -q /tmp/protoc.zip -d /tmp/protoc
+          echo "PROTOC=/tmp/protoc/bin/protoc" >> $GITHUB_ENV
+          /tmp/protoc/bin/protoc --version
+      - name: clippy --features jni --tests
+        run: cargo clippy -p linkx-ffi --features jni --tests -- -D warnings
+      - name: test --features jni
+        run: cargo test -p linkx-ffi --features jni
+  # ── 供应链门禁：依赖安全通告 ──────────────────────────────────────
+  # 这条 job 把 Cargo.lock 交给 RustSec 通告库比对，不上传源码。
+  # 要放行某条必须把编号写进下面的参数，并在 Docs/Security.md 留下理由，不许静默忽略。
+  supply-chain:
+    runs-on: ubuntu-latest
+    needs: core
+    steps:
+      - uses: actions/checkout@v4
+      - name: cargo-audit 0.21.8
+        run: cargo install cargo-audit --version 0.21.8 --locked
+      - name: 主 workspace 依赖漏洞
+        run: cargo audit --file Cargo.lock --ignore RUSTSEC-2023-0071
+      # fuzz 有自己的依赖锁（Tests/fuzz），不进交付产物，但同样会拉到有漏洞的版本，一并扫。
+      - name: fuzz 依赖漏洞
+        run: cargo audit --file Tests/fuzz/Cargo.lock --ignore RUSTSEC-2023-0071

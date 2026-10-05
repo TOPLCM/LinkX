@@ -1,0 +1,63 @@
+// 图片/视频互传：五条消息，全部**只走局域网 TCP**（缩略图与原图都不许降级到蓝牙，同大文件口径）：
+//   0x60 ALBUM_LIST_REQ   电脑 → 手机：要一页清单
+//   0x61 ALBUM_LIST       手机 → 电脑：清单本体（不含图像数据）
+//   0x62 ALBUM_THUMB_REQ  电脑 → 手机：要某一张缩略图
+//   0x63 ALBUM_THUMB      手机 → 电脑：JPEG 字节随帧走
+//   0x64 ALBUM_FULL_REQ   电脑 → 手机：把这些照片当普通文件发回来——复用 FILE_META /
+//                          FILE_CHUNK / FILE_DONE 那套已验证的流式、背压、逐块校验与
+//                          摘要，不另发明一条大数据通道。
+// 缩略图不落盘：手机侧现场生成，电脑侧只在内存里按字节封顶缓存（条数上限挡不住体积红线）。
+// 代价是关掉软件后缓存消失，下次进相册重新生成。
+syntax = "proto3";
+package linkx.v1;
+
+/// 相册里的一条（只带展示与导出需要的元信息，不带图像数据）
+message AlbumItem {
+  fixed64 id = 1;         // 手机相册内的稳定标识（Android 侧 = MediaStore _ID）
+  string name = 2;        // 展示用文件名（含扩展名）
+  int64 size_bytes = 3;   // 原图/原视频字节数
+  int64 mtime_ms = 4;     // 修改时刻（挂钟毫秒；列表按它倒序）
+  uint32 width = 5;       // 像素宽（0 = 手机侧没读到）
+  uint32 height = 6;      // 像素高
+  // kind 用 uint32 而不是枚举，是为了让老版本电脑端收到"不认识的值"时仍按照片渲染
+  // （proto3 未知字段值不报错），不会整页白屏。
+  uint32 kind = 7;        // 0 = 照片，1 = 视频
+  int64 duration_ms = 8;  // 视频时长（毫秒）；照片恒为 0
+}
+
+/// 电脑 → 手机：要第 page 页、每页 per_page 张（0 页起）
+message AlbumListRequest {
+  uint32 page = 1;
+  uint32 per_page = 2;
+}
+
+/// 手机 → 电脑：一页清单
+message AlbumList {
+  repeated AlbumItem items = 1;
+  uint32 page = 2;
+  uint32 total = 3;       // 相册总张数（手机侧读不到权限时填 0）
+  string error = 4;       // 非空 = 有一句要如实告诉用户的话：可能是整页没取到（items 为空），
+                          // 也可能是"只共享了选定照片"这类降级说明（items 仍然有效）。
+                          // 电脑侧必须把它显示出来，不许因为"有数据"就吞掉。
+}
+
+/// 电脑 → 手机：要一张缩略图，edge = 长边像素（手机侧会夹到自己的上限）
+message AlbumThumbRequest {
+  fixed64 id = 1;
+  uint32 edge = 2;
+}
+
+/// 手机 → 电脑：缩略图本体
+message AlbumThumb {
+  fixed64 id = 1;
+  uint32 edge = 2;        // 实际给出的长边（可能小于请求值）
+  uint32 width = 3;       // 本图实际宽
+  uint32 height = 4;      // 本图实际高
+  bytes jpeg = 5;         // JPEG 字节；error 非空时为空
+  string error = 6;       // 非空 = 这张没生成出来，原因显示到格子上
+}
+
+/// 电脑 → 手机：把这些照片按普通文件发回来（顺序即数组顺序）
+message AlbumFullRequest {
+  repeated fixed64 ids = 1;
+}

@@ -1,0 +1,56 @@
+// 通知同步：手机 → 电脑推送（NOTIFY_PUSH 0x10），电脑 → 手机回复（NOTIFY_REPLY 0x11），
+// 手机 → 电脑「这条通知已经不在了」（NOTIFY_DISMISS 0x12），手机 → 电脑回执（NOTIFY_REPLY_ACK 0x13）。
+//
+// 回复走的是 Android 官方机制：应用自己在通知上挂了 `RemoteInput`，我们用
+// NotificationListenerService 拿到那个 PendingIntent 并把文字塞回去。应用没挂，
+// 就没有回复入口（由应用自己决定挂不挂）。
+syntax = "proto3";
+package linkx.v1;
+
+message NotificationPush {
+  string package = 1;     // 来源应用包名
+  string title = 2;       // 标题
+  string text = 3;        // 正文（来源应用标记为敏感时不传，电脑只显示"有新通知"）
+  int64 post_ts_ms = 4;   // 通知产生时间
+  uint32 key_hash = 5;    // NOTIFY_UPDATE 稳定 key 合并用
+  bytes cover_jpeg = 6;   // 通知封面（<=32KB JPEG q80，可选）
+  // ---- 回复定位三元组：对端拿它回一条通知时原样带回来 ----
+  // 电脑侧无法从 key_hash 反推出 Android 的 action，所以这里把定位信息说明白。
+  // 手机侧**不缓存**通知对象，收到回复时凭 pkg + tag + id 在"仍在通知栏"的条目里现找：
+  // 缓存下来的 PendingIntent 在通知被划掉后就是废的，拿它回复只会静默失败。
+  string tag = 7;             // StatusBarNotification.tag（无 tag 时为空串）
+  int32 notification_id = 8;  // StatusBarNotification.id
+  bool can_reply = 9;         // 应用自己挂了 RemoteInput 才为真
+  int32 reply_action_index = 10; // 挂该 RemoteInput 的是第几个 action
+  string reply_result_key = 11;  // 要填的 RemoteInput.resultKey
+}
+
+/// 电脑 → 手机：回复某条通知
+message NotificationReply {
+  uint32 reply_id = 1;  // 电脑侧自增序号，回执原样带回（同一应用多条通知要靠它对上）
+  string package = 2;
+  string tag = 3;
+  int32 notification_id = 4;
+  int32 action_index = 5;
+  string result_key = 6;
+  string text = 7;      // 回复正文（手机侧限长，超长的在发送前就拒掉）
+}
+
+/// 手机 → 电脑：回复结果。**每条请求必有一条回执**，沉默只会让电脑干等到用户怀疑没发出去。
+message NotificationReplyAck {
+  uint32 reply_id = 1;
+  string package = 2;   // 只为日志与对账，定位仍以 reply_id 为准
+  bool ok = 3;
+  string error = 4;     // 非空 = 有一句要如实告诉用户的话（"该应用不支持回复"等），电脑侧原样显示
+}
+
+/// 手机 → 电脑：这条通知已经从通知栏消失了。
+/// 只报**当初带过 can_reply 的那几条**：回复入口点下去只会得到一句"这条通知已经不在了"，
+/// 而通知被应用自己清掉是常态（从通知里回完短信，短信应用就把通知撤了）。
+/// 正文照常留在电脑列表里可复制 —— 电脑上的"最近通知"不是通知栏的镜像。
+message NotificationDismiss {
+  string package = 1;
+  string tag = 2;
+  int32 notification_id = 3;
+  uint32 key_hash = 4;  // 与推送时同一个稳定 key 哈希，电脑据此对上行
+}

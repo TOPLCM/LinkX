@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 由 Scripts/svg_assets.py 从 svg/下载.svg 生成，勿手改。
+     几何与 Windows 端 icons_svg.rs 完全同源（同一份 svg/ + 同一套归一化与抽稀），
+     着色由 Compose 的 Icon(tint = …) 负责，所以这里不写 android:tint ——
+     纯 Compose 工程没有 appcompat 主题，`?attr/colorControlNormal` 在 AAPT 阶段就解析不了。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path android:pathData="M20.60,14.55 L20.59,20.11 L20.39,20.62 L19.91,20.95 L4.37,21.00 L3.81,20.80 L3.45,20.30 L3.40,14.45 L3.61,13.94 L4.08,13.61 L4.49,13.56 L4.88,13.67 L5.19,13.94 L5.37,14.30 L5.40,19.00 L18.60,19.00 L18.60,14.52 L18.68,14.17 L19.12,13.67 L19.79,13.57 L20.36,13.90 L20.54,14.21 L20.60,14.55Z M11.29,15.81 L11.59,16.02 L11.94,16.11 L12.31,16.06 L12.63,15.88 L16.72,11.72 L16.92,11.41 L16.99,11.09 L16.88,10.58 L16.54,10.20 L16.09,10.04 L15.59,10.12 L15.29,10.32 L13.00,12.66 L12.99,3.90 L12.89,3.55 L12.68,3.27 L12.39,3.08 L12.03,3.00 L11.65,3.06 L11.35,3.24 L11.12,3.52 L11.01,3.90 L11.00,12.66 L8.73,10.34 L8.39,10.11 L7.91,10.04 L7.46,10.20 L7.14,10.55 L7.01,10.99 L7.06,11.35 L7.25,11.69 L11.29,15.81Z" android:fillColor="#FF000000" android:fillType="nonZero" />
+</vector>
