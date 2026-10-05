@@ -110,8 +110,11 @@ TASK="assembleDebug"
 # 内存紧张的机器上：gradle.properties 的 parallel + 默认 worker 数会让 R8 阶段 OOM，
 # Gradle daemon 被内核杀掉（"daemon disappeared unexpectedly"）。
 # 故显式关闭并行并把 worker 限为 1；单模块构建无并行收益，属无副作用约束。
+# --offline 是给本机的（依赖已在本地缓存，联网检索只会变慢）；CI 是冷缓存，用 GRADLE_ONLINE=1 放行。
+GRADLE_NET="--offline"
+[ "${GRADLE_ONLINE:-0}" = "1" ] && GRADLE_NET=""
 ( cd Platforms/Android && JAVA_HOME="$JAVA_HOME_21" PATH="$JAVA_HOME_21/bin:$PATH" \
-    "$GRADLE_BIN" -p . "$TASK" --no-daemon --no-parallel --offline \
+    "$GRADLE_BIN" -p . "$TASK" --no-daemon --no-parallel $GRADLE_NET \
     -Dorg.gradle.workers.max=1 -q )
 echo "  ✅ gradle $TASK 完成"
 
