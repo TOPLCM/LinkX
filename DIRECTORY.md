@@ -14,7 +14,7 @@ Rust crate 名带 `linkx-` 前缀（`debuglog` 除外，它是历史名）。
 
 ## 一级目录
 
-```
+```text
 LinkX/
 ├── Crates/          共享 Rust 核心，电脑端与手机端链接的是同一份
 ├── Platforms/       两个平台的壳：Windows 与 Android

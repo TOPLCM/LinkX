@@ -2,7 +2,7 @@
 
 > 开源的跨端协同效率革命工具
 
-让手机躺在口袋里,把事情在电脑上办完
+让手机躺在口袋里，把事情在电脑上办完
 
 官网：[linkx.chaoming.xyz](https://linkx.chaoming.xyz)
 
