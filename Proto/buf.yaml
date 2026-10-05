@@ -3,7 +3,7 @@ version: v1
 name: buf.build/linkx/linkx
 lint:
   use:
-    - STANDARD
+    - DEFAULT
   except:
     - PACKAGE_VERSION_SUFFIX   # 不做 v1 后缀强制（proto 已按目录分层）
     - ENUM_VALUE_PREFIX        # 媒体指令的枚举值沿用动作语义（PLAY/PAUSE/…），
