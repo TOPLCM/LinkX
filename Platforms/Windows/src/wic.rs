@@ -7,8 +7,6 @@ use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::ptr::null_mut;
 
-#[cfg(debug_assertions)]
-use windows::Win32::Foundation::GlobalFree;
 use windows::Win32::Graphics::Gdi::{
     CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP,
     HGDIOBJ,
@@ -247,7 +245,11 @@ pub(crate) fn solid_jpeg(width: u32, height: u32, rgb: u32) -> Result<Vec<u8>, S
         let len = GlobalSize(hglobal);
         let p = GlobalLock(hglobal) as *const u8;
         if len == 0 || p.is_null() {
-            let _ = GlobalFree(hglobal);
+            // 不手动 GlobalFree：流是按 fDeleteOnRelease=TRUE 建的，这块内存归它所有，
+            // 流 drop 时还要再放一次 —— 我们放手就是双重释放（堆破坏）。只把锁解开。
+            if !p.is_null() {
+                let _ = GlobalUnlock(hglobal);
+            }
             return Err("编码结果取不回来（0 字节或内存上锁失败）".to_string());
         }
         let out = std::slice::from_raw_parts(p, len).to_vec();

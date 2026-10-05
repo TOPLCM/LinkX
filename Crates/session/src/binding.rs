@@ -137,7 +137,12 @@ impl ChannelBinding {
             return Err(BindError::NonceMismatch);
         }
         let expect = channel_bind_tag(&self.key, &my[..]);
-        if tag != expect {
+        // 折叠异或而不是 `!=`：切片比较在第一个不同字节就返回，MAC 的比对照例上不该带时间差
+        let diff = tag
+            .iter()
+            .zip(expect.iter())
+            .fold(0u8, |acc, (a, b)| acc | (a ^ b));
+        if diff != 0 {
             return Err(BindError::TagMismatch);
         }
         self.step = BindStep::Bound;

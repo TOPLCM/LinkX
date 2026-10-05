@@ -107,7 +107,6 @@ struct Segment {
     /// 已入槽字节数：累积**过程中**就要守住 1MB 上限，不能等组完再算（防内存 DoS）
     got_bytes: usize,
     slots: Vec<Option<Vec<u8>>>,
-    first_header: Option<[u8; FRAME_HEADER_LEN]>,
     /// 最后一次"有分片进槽"的时刻。它**必须**随进展刷新：一条 256 KiB 消息在 MTU 517 下是
     /// 518 个分片，蓝牙单片在途按 30–50 ms 算要 15–25 s，若期限从建组那刻算起（绝对期限），
     /// 正在顺利传输的组会被自己的接收器半路清掉，剩下的分片再重建一个永远组不满的组 ——
@@ -136,7 +135,6 @@ impl Segment {
             got: 0,
             got_bytes: 0,
             slots: vec![None; count as usize],
-            first_header: None,
             progress_at: now,
         })
     }
@@ -168,14 +166,15 @@ impl BleReassembler {
 
         self.sweep(now);
 
-        // 并发分组数达上限时淘汰最旧（原因见 MAX_CONCURRENT_GROUPS 注释）
-        if !self.segs.contains_key(&msg_id) && self.segs.len() >= MAX_CONCURRENT_GROUPS {
-            self.evict_oldest();
-        }
-
-        if let std::collections::hash_map::Entry::Vacant(e) = self.segs.entry(msg_id) {
-            let s = Segment::new(cnt, now)?;
-            e.insert(s);
+        // 新分组先过 `Segment::new` 的校验，再动淘汰：一串声明超限的非法首片不该在被拒之前
+        // 顺手把在途的合法分组挤掉
+        if !self.segs.contains_key(&msg_id) {
+            let seg = Segment::new(cnt, now)?;
+            // 并发分组数达上限时淘汰最旧（原因见 MAX_CONCURRENT_GROUPS 注释）
+            if self.segs.len() >= MAX_CONCURRENT_GROUPS {
+                self.evict_oldest();
+            }
+            self.segs.insert(msg_id, seg);
         }
         let seg = self.segs.get_mut(&msg_id).expect("刚插入必然存在");
         if seg.count != cnt {
@@ -197,11 +196,6 @@ impl BleReassembler {
         seg.got_bytes += chunk.len();
         // 有进展就续期：`progress_at` 同时是超时判据与淘汰判据（见字段注释）
         seg.progress_at = now;
-
-        // 首片捕获帧头（用于最终校验）
-        if idx == 0 && seg.first_header.is_none() && chunk.len() >= FRAME_HEADER_LEN {
-            seg.first_header = Some(chunk[..FRAME_HEADER_LEN].try_into().unwrap());
-        }
 
         if seg.got < seg.count {
             return Ok(None);
@@ -523,6 +517,33 @@ mod tests {
             r.pending_count() <= MAX_CONCURRENT_GROUPS,
             "并发分组数必须被上限约束（实际 {}）",
             r.pending_count()
+        );
+    }
+
+    /// 淘汰只许发生在"这条分组本身合法"之后：一串声明超限的首片不该顺手挤掉在途分组。
+    #[test]
+    fn invalid_first_fragment_does_not_evict_inflight_groups() {
+        let t0 = Instant::now();
+        let mut r = BleReassembler::new();
+        for id in 0..MAX_CONCURRENT_GROUPS as u16 {
+            let frame = make_frame(&[0x01; 100], 0, msg_type::HELLO);
+            let pkts = split_into_packets(id, MTU_DEFAULT, &frame).unwrap();
+            r.feed(t0, &pkts[0]).expect("合法首片应被收下");
+        }
+        assert_eq!(r.pending_count(), MAX_CONCURRENT_GROUPS, "前提：表已灌满");
+
+        // 非法首片：cnt 大到声明总长超过单消息上限
+        let mut bad = [0u8; FRAG_HEADER_LEN];
+        bad[0..2].copy_from_slice(&999u16.to_be_bytes());
+        bad[4..6].copy_from_slice(&u16::MAX.to_be_bytes());
+        assert!(matches!(
+            r.feed(t0, &bad),
+            Err(BleFragError::GroupTooLarge { .. })
+        ));
+        assert_eq!(
+            r.pending_count(),
+            MAX_CONCURRENT_GROUPS,
+            "被拒绝的非法分组不得挤掉任何一个在途分组"
         );
     }
 }

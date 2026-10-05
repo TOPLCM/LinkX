@@ -311,18 +311,28 @@ impl SendTask {
     }
 
     /// FILE_DONE body（0x32）；同时落终态。成功时带上增量算出的整文件摘要。
+    ///
+    /// "拿不到摘要就不许报成功"这条写在 [`Self::whole_file_digest`] 的文档里，这里把它做进
+    /// 函数而不是留给调用方自觉：调用纪律会被下一次重构忘掉，而一条 `ok=true` 的空摘要回执
+    /// 在对端看来就是"传完了"。
     pub fn finish(&mut self, ok: bool, error: Option<&str>) -> Vec<u8> {
-        self.state = if ok {
-            TransferState::Done
-        } else {
-            TransferState::Failed
-        };
         let sha = if ok {
             self.whole_file_digest().map(|d| d.0)
         } else {
             None
         };
-        protocol::encode_done_sha(self.file_id, ok, sha.as_ref(), error)
+        let ok = ok && sha.is_some();
+        self.state = if ok {
+            TransferState::Done
+        } else {
+            TransferState::Failed
+        };
+        let error = match error {
+            Some(e) => Some(e.to_string()),
+            None if !ok => Some("整文件摘要没算全，未报告成功".to_string()),
+            None => None,
+        };
+        protocol::encode_done_sha(self.file_id, ok, sha.as_ref(), error.as_deref())
     }
 
     /// 用户取消收尾：落 `Cancelled`（不是 `Failed`），FILE_DONE 带 `cancelled = true`。
@@ -953,6 +963,31 @@ mod tests {
 
     fn payload(len: usize) -> Vec<u8> {
         (0..len as u32).map(|i| (i % 251) as u8).collect()
+    }
+
+    /// 「拿不到摘要就不许报成功」现在写在函数里而不是调用纪律里：摘要没算全时
+    /// `finish(true, ..)` 也必须落成失败，否则对端收到的是一条"传完了"的空摘要回执。
+    #[test]
+    fn finish_without_complete_digest_reports_failure() {
+        let mut t = SendTask::streaming(7, "a.bin", 1024, 256).unwrap();
+        let done = protocol::decode_done(&t.finish(true, None)).unwrap();
+        assert!(!done.ok, "流式任务一块都没发，不能报成功");
+        assert!(done.sha256.is_empty(), "更不该带出摘要");
+        assert!(
+            done.error.unwrap_or_default().contains("摘要"),
+            "要说清为什么从成功改成了失败"
+        );
+        assert_eq!(t.state, TransferState::Failed);
+
+        // 预先声明摘要的旧口径不受影响
+        let mut old = SendTask::new(8, "b.bin", 4, [1u8; 32], 2, 256).unwrap();
+        let done = protocol::decode_done(&old.finish(true, None)).unwrap();
+        assert!(done.ok, "META 里就带摘要的口径照旧成功");
+        assert_eq!(&done.sha256[..], &[1u8; 32][..]);
+        // 失败时调用方给的原因原样保留，不被这里改写
+        let mut t3 = SendTask::streaming(9, "c.bin", 4, 256).unwrap();
+        let done = protocol::decode_done(&t3.finish(false, Some("链路断了"))).unwrap();
+        assert_eq!(done.error.unwrap_or_default(), "链路断了");
     }
 
     /// 端到端（内存内）：发送任务产出 body → 接收任务消费

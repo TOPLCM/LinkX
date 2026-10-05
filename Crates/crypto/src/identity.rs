@@ -46,8 +46,7 @@ pub struct DeviceIdentity {
 
 impl DeviceIdentity {
     pub fn generate() -> Result<Self, IdentityError> {
-        let mut rng = rand::thread_rng();
-        let sk = RsaPrivateKey::new(&mut rng, RSA_KEY_BITS)
+        let sk = RsaPrivateKey::new(&mut rand_core::OsRng, RSA_KEY_BITS)
             .map_err(|e| IdentityError::KeyGen(e.to_string()))?;
         Ok(Self { sk })
     }
@@ -183,19 +182,18 @@ pub fn verify_binding(pk_der: &[u8], handshake_hash: &[u8; 32], sig: &[u8]) -> b
 
 // ---- IDENTITY 消息载荷编解码（长度前缀二进制；TLV 1B len 上限装不下 294B SPKI） ----
 
-/// 编码：`u16 pk_len | pk_der | u16 sig_len | sig`（均大端）
-pub fn encode_identity_payload(pk_der: &[u8], sig: &[u8]) -> Vec<u8> {
-    // u16 装不下就当场在类型上拒绝，不能静默截断成另一个数（双端会解出不同载荷）
-    debug_assert!(
-        pk_der.len() <= u16::MAX as usize && sig.len() <= u16::MAX as usize,
-        "IDENTITY 载荷字段越过 u16 长度前缀"
-    );
+/// 编码：`u16 pk_len | pk_der | u16 sig_len | sig`（均大端）。装不进 u16 长度前缀时返回 `None`
+/// 而不是静默截断成另一个数（双端会解出不同载荷）。
+pub fn encode_identity_payload(pk_der: &[u8], sig: &[u8]) -> Option<Vec<u8>> {
+    let (Ok(pk_len), Ok(sig_len)) = (u16::try_from(pk_der.len()), u16::try_from(sig.len())) else {
+        return None;
+    };
     let mut out = Vec::with_capacity(4 + pk_der.len() + sig.len());
-    out.extend_from_slice(&(pk_der.len() as u16).to_be_bytes());
+    out.extend_from_slice(&pk_len.to_be_bytes());
     out.extend_from_slice(pk_der);
-    out.extend_from_slice(&(sig.len() as u16).to_be_bytes());
+    out.extend_from_slice(&sig_len.to_be_bytes());
     out.extend_from_slice(sig);
-    out
+    Some(out)
 }
 
 pub fn decode_identity_payload(payload: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
@@ -304,10 +302,13 @@ mod tests {
         let id = ident();
         let pk = id.public_der().unwrap();
         let sig = id.sign_binding(&[0x01u8; 32]).unwrap();
-        let payload = encode_identity_payload(&pk, &sig);
+        let payload = encode_identity_payload(&pk, &sig).expect("294B DER + 256B 签名装得进 u16");
         let (pk2, sig2) = decode_identity_payload(&payload).unwrap();
         assert_eq!(pk, pk2);
         assert_eq!(sig, sig2);
+        // 越过长度前缀：宁可不出这条消息，也不能发出一条对端解成别的东西的载荷
+        assert!(encode_identity_payload(&vec![0u8; 70000], &sig).is_none());
+        assert!(encode_identity_payload(&pk, &vec![0u8; 70000]).is_none());
         assert!(decode_identity_payload(&[]).is_none());
         assert!(decode_identity_payload(&[0x00, 0x02, 0xAA]).is_none());
         assert!(decode_identity_payload(&[0xFF, 0xFF, 0x00, 0x02, 0xAA]).is_none());

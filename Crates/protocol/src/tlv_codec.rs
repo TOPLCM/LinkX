@@ -15,6 +15,8 @@ pub enum TlvError {
     TagNotFound(u8),
     #[error("消息总长超限 {0}B（上限 {TLV_MAX_MSG}B）")]
     TooLarge(usize),
+    #[error("条目数超限 {0} 条（一条消息最多 32 条）")]
+    TooManyEntries(usize),
     #[error("声明长度与实际不符")]
     LengthMismatch,
 }
@@ -62,7 +64,10 @@ pub fn encode(items: &[Tlv]) -> Result<Vec<u8>, TlvError> {
     Ok(out)
 }
 
-/// 解析 TLV 序列（任意输入不 panic；截断/超长视为错误）
+/// 解析 TLV 序列（任意输入不 panic；截断、条目数超限视为错误）
+///
+/// 解析端**不**卡 64B 总长：那条是编码侧的自我约束，对端把版本串写长一点就可能超，
+/// 拒了等于把握手打死。内存有界靠的是"条目数 ≤32、单条 len ≤255"这两条硬上限。
 pub fn parse(buf: &[u8]) -> Result<Vec<Tlv>, TlvError> {
     let mut out = Vec::new();
     let mut off = 0usize;
@@ -84,7 +89,7 @@ pub fn parse(buf: &[u8]) -> Result<Vec<Tlv>, TlvError> {
                     return Err(TlvError::Truncated { offset: off, len });
                 }
                 if out.len() >= 32 {
-                    return Err(TlvError::TooLarge(buf.len()));
+                    return Err(TlvError::TooManyEntries(out.len()));
                 }
                 out.push(Tlv {
                     tag,

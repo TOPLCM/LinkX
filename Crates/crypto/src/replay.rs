@@ -66,7 +66,9 @@ impl ReplayWindow {
             Some(h) if seq > h => false,
             Some(h) => {
                 let delta = h - seq;
-                if delta >= 64 {
+                // 位宽就是 window_size（构造时已保证 ≤64）：写死 64 会在窗口被调小的实例上
+                // 去过位图里根本不存在的位，读到的"没见过"也就不再可信
+                if delta >= self.window_size {
                     return false;
                 }
                 self.bitmap & (1u64 << delta) != 0

@@ -38,10 +38,7 @@ pub fn channel_bind_tag(key: &[u8; 32], nonce: &[u8]) -> [u8; CHANNEL_BIND_TAG_L
 
 /// 一次性随机 nonce_tcp（每个 TCP 会话新鲜生成，防重放）
 pub fn generate_bind_nonce() -> [u8; CHANNEL_BIND_NONCE_LEN] {
-    use rand::RngCore;
-    let mut n = [0u8; CHANNEL_BIND_NONCE_LEN];
-    rand::rngs::OsRng.fill_bytes(&mut n);
-    n
+    crate::random_bytes()
 }
 
 #[cfg(test)]

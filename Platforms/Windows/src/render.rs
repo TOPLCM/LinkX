@@ -1577,7 +1577,11 @@ fn text_extent(hdc: HDC, e: &Env, role: Role, s: &str) -> (i32, i32) {
 /// 按像素宽度截断（超出补 "…"）——长剪贴板文本/通知正文用
 #[cfg(windows)]
 fn truncate_px(hdc: HDC, e: &Env, role: Role, s: &str, max_w: i32) -> String {
-    if max_w <= 0 || text_extent(hdc, e, role, s).0 <= max_w {
+    if max_w <= 0 {
+        // 一点位置都没有：还回全文就是让文字压到旁边的元素上，本函数存在的意义就是不越界
+        return String::new();
+    }
+    if text_extent(hdc, e, role, s).0 <= max_w {
         return s.to_string();
     }
     let ell = "…";
@@ -1599,7 +1603,10 @@ fn truncate_px(hdc: HDC, e: &Env, role: Role, s: &str, max_w: i32) -> String {
 /// 按像素宽度**保留尾部**（长路径显示末尾更易辨认），前面补 "…"
 #[cfg(windows)]
 fn tail_px(hdc: HDC, e: &Env, role: Role, s: &str, max_w: i32) -> String {
-    if max_w <= 0 || text_extent(hdc, e, role, s).0 <= max_w {
+    if max_w <= 0 {
+        return String::new();
+    }
+    if text_extent(hdc, e, role, s).0 <= max_w {
         return s.to_string();
     }
     let ell = "…";
@@ -1694,19 +1701,22 @@ fn album_drag_ring(hdc: HDC, e: &Env, cell: &RECT, frac: f32, accent: u32) {
         cy + (r as f32 * ang.sin()) as i32,
     );
     let _ = unsafe { SelectObject(hdc, HGDIOBJ(icons::pen_solid(thick, accent).0)) };
-    let _ = unsafe {
-        Arc(
-            hdc,
-            ring.left,
-            ring.top,
-            ring.right,
-            ring.bottom,
-            ex,
-            ey,
-            cx,
-            cy - r,
-        )
-    };
+    // 0% 不画弧：起点就是 12 点，起终点重合时 GDI 描的是整圈，"还没开始"会画成"已经跑满"
+    if frac.clamp(0.0, 1.0) > 0.0 {
+        let _ = unsafe {
+            Arc(
+                hdc,
+                ring.left,
+                ring.top,
+                ring.right,
+                ring.bottom,
+                ex,
+                ey,
+                cx,
+                cy - r,
+            )
+        };
+    }
     unsafe {
         SelectObject(hdc, old_pen);
         SelectObject(hdc, old_brush);

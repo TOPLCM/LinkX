@@ -19,6 +19,6 @@ thiserror.workspace = true
 # 0.3.0 决策 C：RSA-2048 设备身份（签名/验签）
 rsa.workspace = true
 # 自定义 Noise resolver 运行时 RNG（snow 默认 resolver 已关闭）
-rand.workspace = true
+rand_core.workspace = true
 
 [dev-dependencies]

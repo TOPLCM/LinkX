@@ -26,7 +26,6 @@ debuglog.workspace = true
 # 控制面与其 serde_json 依赖完全不进产物，可用符号表验证。
 linkx-debugd = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
-rand.workspace = true
 
 # windows-rs：Win32 + GDI 自绘 + BLE Central（WinRT）
 [target.'cfg(windows)'.dependencies]
@@ -38,6 +37,9 @@ windows = { version = "0.58.0", features = [
     "Devices_Enumeration",
     "Foundation",
     "Foundation_Collections",
+    # 系统媒体控制卡（音量面板那张卡）：元数据/封面/进度由 Windows.Media 喂，按钮事件回这里
+    "Media",
+    "Media_Control",
     "Storage_Streams",
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
@@ -49,6 +51,8 @@ windows = { version = "0.58.0", features = [
     "Win32_System_Com",
     # 预览态用 WIC 编码器在内存里造纯色 JPEG（不落盘）
     "Win32_System_Com_StructuredStorage",
+    # WinRT 激活工厂：SystemMediaTransportControls 要按窗口句柄取
+    "Win32_System_WinRT",
     # 单张拖出：SHDoDragDrop 的 DROPEFFECT / IDataObject 在这一模块
     "Win32_System_Ole",
     "Win32_System_DataExchange",

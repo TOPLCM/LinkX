@@ -36,6 +36,9 @@ mod network;
 mod render;
 #[cfg(windows)]
 mod settings;
+/// 系统媒体控制卡（音量面板那张卡）：把手机播放态投影过去，并把卡片按钮变回播放指令
+#[cfg(windows)]
+mod smtc;
 #[cfg(windows)]
 mod state;
 #[cfg(windows)]
@@ -157,10 +160,9 @@ fn main() {
     }
     if preview.is_none() {
         app::spawn_worker(hwnd, shared.clone());
-        // 命名管道服务是**文件传输**的入口之一，所以跟着该模块一起开关 —— 否则关掉模块后进程里仍留一条线程和一个管道，"不再加载"就成了假话
-        if features::enabled(features::Module::FileTransfer) {
-            ipc::spawn_pipe_server(shared.clone());
-        }
+        // 命名管道是**壳层**的单实例通道：第二次双击图标要靠它把窗口叫回来，这份职责不属于
+        // 文件互传模块，所以不随模块关停下。模块关掉时挡的是文件转交本身（见 ipc::deliver）。
+        ipc::spawn_pipe_server(shared.clone());
     } else {
         say("[LinkX] UI 预览模式（LINKX_UI_PREVIEW）：未启动 BLE worker");
     }

@@ -6,7 +6,7 @@
 所以这里同时给出 MB/s 与"是否受每轮节流上限影响"的判断。
 
 前置：两端跑 agent-debug 变体、已配对且 TCP 已绑定、`adb forward tcp:55700 tcp:55699`。
-用法：python Scripts/b-bench-throughput.py [--size-mb 50]
+用法：python Scripts/bench-throughput.py [--size-mb 50]
 """
 
 import argparse

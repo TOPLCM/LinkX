@@ -44,7 +44,7 @@ Copyright notice 与许可全文见 `LICENSE`。再次分发须保留该文件�
    - `webrtc = ["crypto", "flate2", "dep:webrtc", "webrtc-signaling", "x509-parser"]`
    - `full` 改为 `["crypto", "discovery", "http", "multicast"]`（不再含 `webrtc`）。
 5. **新增 `LICENSE`**：从上游仓库根目录复制而来（原本位于 `packages/core` 之外）。
-6. **新增 `VENDORING.md`**：本文件。
+6. **新增 `VENDORING.md`**：本文件（后更名为 `PORTING.md`）。
 7. **`src/model/transfer.rs` — 测试时间戳改为 100 ns 对齐**：
    `formats_nanosecond_timestamp` 中 `Duration::from_nanos(123_456_789)` → `123_456_700`，
    期望串 `.123456789Z` → `.1234567Z`。

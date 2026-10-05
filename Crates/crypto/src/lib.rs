@@ -22,6 +22,17 @@ pub use replay::{ReplayError, ReplayWindow, REPLAY_OUT_OF_ORDER_TOLERANCE, REPLA
 
 use sha2::{Digest, Sha256};
 
+/// 系统 CSPRNG 取 `N` 字节：全仓唯一的随机数出口。
+///
+/// 各 crate 想拿随机字节都走这里，不把随机数 crate 铺到每个 Cargo.toml 上（会话序号、绑定
+/// nonce、长期身份私钥全靠它，一处换实现时只用回来查这一处）。
+pub fn random_bytes<const N: usize>() -> [u8; N] {
+    use rand_core::RngCore;
+    let mut b = [0u8; N];
+    rand_core::OsRng.fill_bytes(&mut b);
+    b
+}
+
 /// TOFU 指纹：对方长期身份公钥 SHA-256 → 16 位十六进制
 ///
 /// **位宽取舍**：只取摘要前 8B（64-bit）。TOFU 场景下攻击者需在碰巧命中前尝试约 2^32 次
@@ -60,13 +71,24 @@ pub fn sas_digits(handshake_hash: &[u8; 32]) -> u32 {
     v % 1_000_000
 }
 
-/// 会话密钥派生：HKDF-SHA256(ikm=handshake_hash, salt="linkx/v1", info="session-key")
-pub fn derive_session_key(handshake_hash: &[u8; 32]) -> [u8; 32] {
+/// 会话密钥派生：
+/// `HKDF-SHA256(ikm = Noise Split 的两把传输密钥, salt = 握手哈希 h, info = "linkx/v1/session-key")`
+///
+/// **ikm 里必须有 DH 出来的秘密。** 握手哈希 `h` 全部由线路字节链式算出，录到包的人
+/// 可以自己重算一遍，所以它只做 salt（通道绑定：换一次握手，密钥就跟着变），不再当 ikm。
+/// 两把方向密钥都进 ikm，两端算出来的才是同一把；帧层再按发送方向分域。
+pub fn derive_session_key(
+    handshake_hash: &[u8; 32],
+    transport: (&[u8; 32], &[u8; 32]),
+) -> [u8; 32] {
     use hkdf::Hkdf;
-    let hk = Hkdf::<sha2::Sha256>::new(Some(b"linkx/v1"), handshake_hash);
+    let mut ikm = [0u8; 64];
+    ikm[..32].copy_from_slice(transport.0);
+    ikm[32..].copy_from_slice(transport.1);
+    let hk = Hkdf::<sha2::Sha256>::new(Some(handshake_hash), &ikm);
     let mut okm = [0u8; 32];
     // HKDF 32B 扩张远小于 255*hash_len 上限，数学上不会失败
-    if hk.expand(b"session-key", &mut okm).is_err() {
+    if hk.expand(b"linkx/v1/session-key", &mut okm).is_err() {
         unreachable!("HKDF-SHA256 32B 扩张必然成功（上限 255*32B）");
     }
     // 埋点：会话密钥派生（只记 ok/长度，**绝不记密钥字节**）
@@ -129,8 +151,8 @@ mod tests {
     fn public_key_of_matches_handshake_remote_static() {
         // 与真实 XX 握手交叉验证：responder 的 long-term 公钥 == public_key_of(其私钥)
         let sk = [0x9Bu8; 32];
-        let (_ih, _rh, irs, _rrs) = noise::run_xx_pair(&[0x11u8; 32], &sk).unwrap();
-        assert_eq!(irs, public_key_of(&sk));
+        let out = noise::run_xx_pair(&[0x11u8; 32], &sk).unwrap();
+        assert_eq!(out.i_remote, public_key_of(&sk));
         assert_eq!(public_key_of(&sk), public_key_of(&sk)); // 稳定可复现（TOFU 预置指纹依赖此性质）
         assert_ne!(public_key_of(&sk), public_key_of(&[0x9Cu8; 32]));
     }
@@ -139,11 +161,18 @@ mod tests {
     fn session_key_derives() {
         let h1 = [0x11u8; 32];
         let h2 = [0x22u8; 32];
-        let k1 = derive_session_key(&h1);
-        let k2 = derive_session_key(&h1);
-        let k3 = derive_session_key(&h2);
-        assert_eq!(k1, k2);
-        assert_ne!(k1, k3);
-        assert_eq!(k1.len(), 32);
+        let t = (&[0xA1u8; 32], &[0xB2u8; 32]);
+        assert_eq!(derive_session_key(&h1, t), derive_session_key(&h1, t));
+        assert_ne!(
+            derive_session_key(&h1, t),
+            derive_session_key(&h2, t),
+            "换一次握手必须换密钥（salt 通道绑定）"
+        );
+        assert_ne!(
+            derive_session_key(&h1, t),
+            derive_session_key(&h1, (&[0xA1u8; 32], &[0xB3u8; 32])),
+            "换 DH 秘密必须换密钥（ikm 才是秘密来源）"
+        );
+        assert_eq!(derive_session_key(&h1, t).len(), 32);
     }
 }

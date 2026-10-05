@@ -2,11 +2,11 @@
 //! 而不是再起一个窗口。转交只填发送框、**不代发**——点「发送」的必须是用户（见 `deliver`）。
 
 use std::ffi::c_void;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::os::windows::process::CommandExt;
 use std::sync::atomic::{AtomicIsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{
@@ -14,8 +14,8 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::Storage::FileSystem::PIPE_ACCESS_INBOUND;
 use windows::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, NAMED_PIPE_MODE, PIPE_READMODE_BYTE,
-    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PeekNamedPipe, NAMED_PIPE_MODE,
+    PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows::Win32::System::Threading::CreateMutexW;
 
@@ -27,7 +27,10 @@ const MUTEX_NAME: PCWSTR = w!("Global\\LinkX.SingleInstance");
 /// IPC 命名管道路径（**不放机密**：只传本机文件路径，且只接受本机连接）
 const PIPE_PATH: &str = r"\\.\pipe\linkx_ipc";
 const PIPE_BUFFER: u32 = 4096;
-const READ_INTERVAL_MS: u32 = 1_000;
+/// 一次连接最多等多久才认定"这个客户端不写了"。**必须待在客户端连接重试的预算之内**（≈1.4 s）
+const PIPE_IDLE_WAIT: Duration = Duration::from_millis(1_200);
+/// 有数据时的轮询间隔（正常客户端写完即关，用不到等满超时）
+const PIPE_POLL: Duration = Duration::from_millis(30);
 /// 本进程持有的单实例互斥体句柄原始值（0 = 未持有）。用 `AtomicIsize` 而不是 `static mut HANDLE`：句柄只写一次、重启路径取一次
 static MUTEX_HANDLE: AtomicIsize = AtomicIsize::new(0);
 const CONNECT_TRIES: usize = 12;
@@ -102,6 +105,49 @@ pub(crate) fn spawn_pipe_server(state: SharedState) {
     std::thread::spawn(move || pipe_loop(state));
 }
 
+/// 读一次管道连接，带空闲超时。`CreateNamedPipeW` 的第 7 参只是给客户端 `WaitNamedPipe`
+/// 用的默认等待值，对服务端的读没有任何超时作用 —— 一个"连上、不写、也不关"的客户端能把
+/// 这条唯一的管道线程永久卡死，之后所有「右键发送到 LinkX」都静默失效。
+/// 做法：只用 `PeekNamedPipe` 问"缓冲区里有几字节"，有才读（这时读不阻塞）；对端关闭时
+/// Peek 直接失败，所以正常路径当场就结束，用不到等满空闲超时。
+fn read_pipe_bounded(file: &mut std::fs::File, h: HANDLE) -> Vec<u8> {
+    const MAX_PATH_BYTES: usize = 4096;
+    let mut buf: Vec<u8> = Vec::new();
+    let mut last_byte_at = Instant::now();
+    loop {
+        let mut avail = 0u32;
+        if unsafe { PeekNamedPipe(h, None, 0, None, Some(&mut avail), None) }.is_err() {
+            break; // 对端断开或管道已关：手上这些就是全部
+        }
+        if avail == 0 {
+            if buf.is_empty() {
+                // 一个字都没来：等到空闲超时，超时后外层直接作废这次连接
+                if last_byte_at.elapsed() >= PIPE_IDLE_WAIT {
+                    break;
+                }
+                std::thread::sleep(PIPE_POLL);
+                continue;
+            }
+            break; // 排空了：路径是一次性写进来的，当作写完
+        }
+        let want = (avail as usize).min(MAX_PATH_BYTES - buf.len());
+        if want == 0 {
+            break; // 到上限：剩下的不无限涨
+        }
+        let mut chunk = vec![0u8; want];
+        match std::io::Read::read(file, &mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                last_byte_at = Instant::now();
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    buf
+}
+
 /// 创建管道并循环接收路径；每次连接处理完即 `DisconnectNamedPipe` 等待下一次
 fn pipe_loop(state: SharedState) {
     let name: Vec<u16> = PIPE_PATH.encode_utf16().chain(std::iter::once(0)).collect();
@@ -116,9 +162,8 @@ fn pipe_loop(state: SharedState) {
             1,
             PIPE_BUFFER,
             PIPE_BUFFER,
-            // 读间隔超时：默认 0 = 一直等，而这条线程一被卡住（客户端连上却不写也不关），
-            // 之后所有"右键发送到 LinkX"都静默失效。`take(4096)` 只挡内存，挡不住阻塞。
-            READ_INTERVAL_MS,
+            // 读超时管不到这里，见 read_pipe_bounded
+            0,
             None,
         )
     };
@@ -136,22 +181,11 @@ fn pipe_loop(state: SharedState) {
             std::thread::sleep(Duration::from_millis(200));
             continue;
         }
-        // 一次最多读 4 KiB：`read_to_end` 在对端不关闭时会一直涨
-        const MAX_PATH_BYTES: u64 = 4096;
-        let mut buf = Vec::new();
-        let read = std::io::Read::by_ref(&mut file)
-            .take(MAX_PATH_BYTES)
-            .read_to_end(&mut buf);
+        let buf = read_pipe_bounded(&mut file, h);
         let _ = unsafe { DisconnectNamedPipe(h) };
-        // 读间隔超时也算 Err，但已收到的字节仍是有效载荷：只有一个字都没收到才作废
-        if let Err(e) = read {
-            if buf.is_empty() {
-                crate::say(format!("[LinkX] 管道读取失败，本次转交作废: {e}"));
-                continue;
-            }
-            crate::say(format!(
-                "[LinkX] 管道读取提前结束（{e}），按已收到的内容继续"
-            ));
+        if buf.is_empty() {
+            crate::say("[LinkX] 命名管道连接没有送到内容，本次转交作废");
+            continue;
         }
         let path = String::from_utf8_lossy(&buf).trim().to_string();
         if path.is_empty() {
@@ -171,6 +205,14 @@ fn pipe_loop(state: SharedState) {
 
 /// 把转交来的路径填进文件页的发送框（**不代发**，与拖进窗口、「选择…」同一条口径）
 fn deliver(state: &SharedState, path: &str) {
+    // 文件互传关了就不接转交：管道本身留着是给"再双击一次图标把窗口叫回来"用的（壳层职责）
+    if !crate::features::enabled(crate::features::Module::FileTransfer) {
+        let mut st = state.lock().unwrap();
+        st.push_error(format!("文件互传已关闭，{path} 的转交没有接收"));
+        st.ui_rev += 1;
+        crate::say("[LinkX] 文件互传已关闭，本次转交未接收");
+        return;
+    }
     // 这是"本机任意进程 → 让 LinkX 把一个文件发给对端"的入口，两条底线：路径必须真的是个文件、
     // 只填输入框不代发。少了第二条，任何本机进程都能借已配对的 LinkX 静默外发它读到的任何文件。
     if !std::fs::metadata(path).is_ok_and(|m| m.is_file()) {
@@ -194,4 +236,93 @@ fn deliver(state: &SharedState, path: &str) {
     post_state_changed(hwnd_raw);
     // 实例可能藏在托盘里：只填输入框的话，用户看到的是"右键发送到 LinkX 之后什么都没发生"
     crate::window::request_show_from_raw(hwnd_raw);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicU32;
+
+    /// 真建一对管道跑一遍 `read_pipe_bounded`：这条线程被"连上不写"的客户端卡死过一次，
+    /// 只能靠真实句柄验，假输入模拟不出 Win32 的阻塞语义。
+    fn round_trip(client: impl FnOnce(std::fs::File) + Send + 'static) -> (Vec<u8>, Duration) {
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let path = format!(
+            "\\\\.\\pipe\\linkx_ipc_test_{}_{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        );
+        let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+        let mode = NAMED_PIPE_MODE(
+            PIPE_TYPE_BYTE.0 | PIPE_READMODE_BYTE.0 | PIPE_WAIT.0 | PIPE_REJECT_REMOTE_CLIENTS.0,
+        );
+        let handle = unsafe {
+            CreateNamedPipeW(
+                PCWSTR(wide.as_ptr()),
+                PIPE_ACCESS_INBOUND,
+                mode,
+                1,
+                PIPE_BUFFER,
+                PIPE_BUFFER,
+                0,
+                None,
+            )
+        };
+        assert!(!handle.is_invalid(), "建测试管道失败");
+        let mut server = unsafe { std::fs::File::from_raw_handle(handle.0) };
+        let writer = std::thread::spawn(move || {
+            let c = match std::fs::OpenOptions::new().write(true).open(&path) {
+                Ok(c) => c,
+                Err(e) => panic!("客户端连不上自己的测试管道: {e}"),
+            };
+            client(c);
+        });
+        let h = HANDLE(server.as_raw_handle());
+        let connected = unsafe { ConnectNamedPipe(h, None) }.is_ok()
+            || unsafe { GetLastError() } == ERROR_PIPE_CONNECTED;
+        assert!(connected, "测试管道握手失败");
+        let t0 = Instant::now();
+        let buf = read_pipe_bounded(&mut server, h);
+        let elapsed = t0.elapsed();
+        let _ = unsafe { DisconnectNamedPipe(h) };
+        let _ = writer.join();
+        (buf, elapsed)
+    }
+
+    const PAYLOAD: &[u8] = b"E:\\Dir\\report.pdf";
+
+    #[test]
+    fn pipe_read_returns_the_payload_without_waiting_for_the_timeout() {
+        let (buf, elapsed) = round_trip(|mut c| {
+            c.write_all(PAYLOAD).expect("写测试载荷");
+            drop(c); // 写完即关：正常「右键发送到 LinkX」就是这个形状
+        });
+        assert_eq!(buf, PAYLOAD, "写完即关的客户端要当场读到");
+        assert!(
+            elapsed < PIPE_IDLE_WAIT / 2,
+            "正常转交不该等满空闲超时：{elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn client_that_never_writes_cannot_wedge_the_pipe_thread() {
+        let (buf, elapsed) = round_trip(|c| {
+            std::thread::sleep(PIPE_IDLE_WAIT * 3); // 连上、不写、也不关：drop 只发生在超时之后
+            drop(c);
+        });
+        assert!(buf.is_empty(), "没收到内容就不该编造载荷");
+        assert!(
+            elapsed >= PIPE_IDLE_WAIT && elapsed < PIPE_IDLE_WAIT * 2,
+            "空闲超时没生效（旧写法在这里会永久卡住）：{elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn pipe_payload_is_capped() {
+        let (buf, _) = round_trip(|mut c| {
+            let _ = c.write_all(&[b'A'; 5000]); // 超上限：多出来的部分不能无限涨
+            drop(c);
+        });
+        assert_eq!(buf.len(), 4096, "载荷上限 4 KiB 要硬生效");
+    }
 }

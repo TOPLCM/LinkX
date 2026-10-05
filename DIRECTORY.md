@@ -33,7 +33,7 @@ LinkX/
 ## 根文件
 
 - `README.md` 产品简介：能做什么、怎么上手、技术框架、许可。
-- `CHANGELOG.md` 逐版变更（0.1.0 → 0.5.0）。
+- `CHANGELOG.md` 逐版变更（0.1.0 → 0.5.1）。
 - `DIRECTORY.md` 本文件。
 - `LICENSE` GPL-3.0-or-later 的 FSF 官方全文。
 - `THIRD_PARTY_LICENSES.md` 第三方代码与素材登记，以及随产物分发的义务。

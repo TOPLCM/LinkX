@@ -31,8 +31,8 @@
 
 | 平台 | 要求 | 体积 |
 |---|---|---|
-| Windows | 10/11 x64 | MSI 0.61 MB |
-| Android | 8.0+ arm64 | APK 2.32 MB |
+| Windows | 10/11 x64 | MSI 0.63 MB |
+| Android | 8.0+ arm64 | APK 2.40 MB |
 
 MSI 未代码签名，首次运行有 SmartScreen 提示（更多信息 → 仍要运行）。
 

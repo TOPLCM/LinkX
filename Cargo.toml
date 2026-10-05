@@ -46,7 +46,7 @@ linkx-ffi = { path = "Crates/ffi" }
 chacha20poly1305 = "0.10.1"
 # Y4：关闭 snow 默认 resolver（其会拉入 aes-gcm），由 linkx-crypto 自定义 resolver 提供
 # ChaCha20Poly1305 / SHA256 / X25519 原语
-snow = { version = "0.9.6", default-features = false }
+snow = { version = "0.9.6", default-features = false, features = ["risky-raw-split"] }
 x25519-dalek = { version = "2.0", default-features = false, features = ["static_secrets", "zeroize"] }
 # 0.3.0 决策 C：RSA-2048 持久化设备身份（仅签名/验签，不参与消息加密；Y4 不变）
 rsa = { version = "0.9", features = ["sha2"] }
@@ -55,7 +55,7 @@ crc32fast = "1.4.2"
 hmac = "0.12.1"
 hkdf = "0.12.4"
 hex = "0.4.3"
-rand = "0.8.5"
+rand_core = { version = "0.6.4", features = ["getrandom", "std"] }
 thiserror = "1.0.61"
 prost = "0.12.6"
 prost-build = "0.12.6"

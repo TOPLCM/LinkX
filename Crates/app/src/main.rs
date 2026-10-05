@@ -95,12 +95,14 @@ fn main() {
 
     // 4. Noise XX 双端握手（两端得到同一哈希/SAS/会话密钥）
     run!("Noise XX pair derives shared secrets", {
-        let (ih, rh, irs, rrs) = run_xx_pair(&[0xAA; 32], &[0xBB; 32]).unwrap();
-        ih == rh
-            && derive_session_key(&ih) == derive_session_key(&rh)
-            && sas_digits(&ih) == sas_digits(&rh)
-            && fingerprint(&irs).len() == 16
-            && fingerprint(&rrs).len() == 16
+        let out = run_xx_pair(&[0xAA; 32], &[0xBB; 32]).unwrap();
+        let i_key = derive_session_key(&out.i_hash, (&out.i_split.0, &out.i_split.1));
+        let r_key = derive_session_key(&out.r_hash, (&out.r_split.0, &out.r_split.1));
+        out.i_hash == out.r_hash
+            && i_key == r_key
+            && sas_digits(&out.i_hash) == sas_digits(&out.r_hash)
+            && fingerprint(&out.i_remote).len() == 16
+            && fingerprint(&out.r_remote).len() == 16
     });
 
     // 5. 会话状态机（首次配对路径）

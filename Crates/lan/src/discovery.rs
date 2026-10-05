@@ -182,19 +182,20 @@ impl PeerTable {
             .collect()
     }
 
-    /// 登记/刷新一条信标来源；同 IP 复用条目（返回刷新后的快照，`new` = 是否新增）
+    /// 登记/刷新一条信标来源；同 IP 复用条目（返回刷新后的快照，`new` = 是否新增）。
+    /// `None` = 这是一条新来源但没进表（表满且全是手动条目）：调用方不该把它当设备呈现。
     pub fn upsert_beacon(
         &mut self,
         addr: SocketAddr,
         beacon: DiscoveryBeacon,
         now: Instant,
-    ) -> (PeerEntry, bool) {
+    ) -> Option<(PeerEntry, bool)> {
         if let Some(p) = self.peers.iter_mut().find(|p| p.addr.ip() == addr.ip()) {
             p.addr = addr;
             p.beacon = Some(beacon);
             p.last_seen = now;
             p.updates += 1;
-            return (p.clone(), false);
+            return Some((p.clone(), false));
         }
         let entry = PeerEntry {
             addr,
@@ -203,17 +204,21 @@ impl PeerTable {
             last_seen: now,
             updates: 1,
         };
-        self.push_capped(entry.clone());
-        (entry, true)
+        // 进了表才算"新设备"：否则日志与列表上会冒出一个没人跟踪的幽灵条目
+        if self.push_capped(entry.clone()) {
+            Some((entry, true))
+        } else {
+            None
+        }
     }
 
     /// 有界插入：满了挤掉"最久没见"的非手动条目，而不是拒绝新来者。
     /// 信标只有 64 B，但源地址没有上限——不设限的代价不是崩溃，是设备列表被垃圾淹没
     /// 加上每轮线性扫描变慢（与 `ble_frag` 的并发分组上限同一套手法）。
-    fn push_capped(&mut self, entry: PeerEntry) {
+    fn push_capped(&mut self, entry: PeerEntry) -> bool {
         if self.peers.len() < MAX_PEER_ENTRIES {
             self.peers.push(entry);
-            return;
+            return true;
         }
         let victim = self
             .peers
@@ -226,7 +231,9 @@ impl PeerTable {
         if let Some(i) = victim {
             self.peers.remove(i);
             self.peers.push(entry);
+            return true;
         }
+        false
     }
 
     /// 手动 IP 兜底：登记用户输入的地址（无信标信息，不随超时清理）
@@ -442,7 +449,9 @@ impl UdpDiscovery {
             }
             seen_ips.push(from.ip());
             let addr = SocketAddr::new(from.ip(), from.port());
-            let (entry, is_new) = self.peers.upsert_beacon(addr, beacon, now);
+            let Some((entry, is_new)) = self.peers.upsert_beacon(addr, beacon, now) else {
+                continue;
+            };
             if is_new {
                 debuglog::log!(
                     Level::Info,
@@ -497,6 +506,30 @@ mod tests {
             "对端表越写越大：{} 条",
             t.len()
         );
+    }
+
+    /// 表满且挤不掉任何条目时，这条来源根本没进表：既然没进表，就不许以"新设备"的身份
+    /// 出现在日志和本轮列表里（否则设备列表里会冒出一个没人跟踪、点不动的幽灵条目）。
+    #[test]
+    fn rejected_beacon_is_not_reported_as_a_new_peer() {
+        let mut t = PeerTable::new(DISCOVERY_PEER_TIMEOUT);
+        let base = Instant::now();
+        for i in 0..MAX_PEER_ENTRIES as u32 {
+            t.upsert_manual(
+                SocketAddr::from((
+                    Ipv4Addr::new(10, 0, (i / 251) as u8, (i % 251) as u8 + 1),
+                    0,
+                )),
+                base,
+            );
+        }
+        assert_eq!(t.len(), MAX_PEER_ENTRIES, "前提：手动条目把表灌满");
+        assert!(
+            t.upsert_beacon(loopback(60001), beacon("junk"), base)
+                .is_none(),
+            "没进表的来源不得回报成新增"
+        );
+        assert_eq!(t.len(), MAX_PEER_ENTRIES, "手动条目不许被信标挤掉");
     }
 
     fn beacon(name: &str) -> DiscoveryBeacon {
@@ -604,8 +637,9 @@ mod tests {
         assert_eq!(table.prune(t0 + Duration::from_secs(3600)), Vec::new());
         assert_eq!(table.len(), 1);
         // 收到信标 → 补全信息，manual 标记保留
-        let (e, new) =
-            table.upsert_beacon(loopback(55676), beacon("pc"), t0 + Duration::from_secs(5));
+        let (e, new) = table
+            .upsert_beacon(loopback(55676), beacon("pc"), t0 + Duration::from_secs(5))
+            .expect("表里就有条目，必然返回快照");
         assert!(!new);
         assert!(e.manual);
         assert_eq!(e.beacon.unwrap().advert_name, "pc");
@@ -620,10 +654,13 @@ mod tests {
     fn dedupe_by_ip_across_ports() {
         let mut table = PeerTable::default();
         let t0 = Instant::now();
-        let (e1, new1) = table.upsert_beacon(loopback(55676), beacon("pc"), t0);
+        let (e1, new1) = table
+            .upsert_beacon(loopback(55676), beacon("pc"), t0)
+            .expect("空表就该收下第一条");
         assert!(new1);
-        let (e2, new2) =
-            table.upsert_beacon(loopback(60000), beacon("pc"), t0 + Duration::from_secs(3));
+        let (e2, new2) = table
+            .upsert_beacon(loopback(60000), beacon("pc"), t0 + Duration::from_secs(3))
+            .expect("同 IP 复用条目");
         assert!(!new2);
         assert_eq!(table.len(), 1);
         assert_eq!(e1.updates, 1);

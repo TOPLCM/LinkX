@@ -28,13 +28,13 @@ use linkx_protocol::frame::{assemble_frame, flags, parse_full_frame, FrameHeader
 use linkx_protocol::pb::{
     AlbumFullRequest, AlbumItem, AlbumList, AlbumListRequest, AlbumThumb, AlbumThumbRequest,
     ClipboardPush, ConfigSync, DeviceStatus, FileCancel, FileChunk, FileDone, FileMeta,
-    MediaCommand, MediaState, NotificationDismiss, NotificationPush, NotificationReply,
+    MediaCommand, MediaCover, MediaState, NotificationDismiss, NotificationPush, NotificationReply,
     NotificationReplyAck,
 };
 use linkx_protocol::tlv_codec::{self, Tlv};
 use linkx_protocol::{
-    msg_type, MSG_IDENTITY, MSG_PAIR_CONFIRM, MSG_PAIR_DONE, TAG_ADVERT_NAME, TAG_FILE_ID, TAG_OS,
-    TAG_RESUME_FROM, TAG_VERSION,
+    msg_type, MSG_IDENTITY, MSG_PAIR_CONFIRM, MSG_PAIR_DONE, TAG_ADVERT_NAME, TAG_FILE_ID,
+    TAG_HELLO_SEQ, TAG_OS, TAG_RESUME_FROM, TAG_VERSION,
 };
 use prost::Message;
 use sha2::{Digest, Sha256};
@@ -56,6 +56,21 @@ pub const BLE_MTU_MAX: usize = linkx_protocol::ble_frag::MAX_ATT_MTU;
 pub const DISCOVER_REATTACH: Duration = Duration::from_secs(5);
 /// HELLO 内 advert_name 截断上限（保 TLV ≤64B）
 pub const HELLO_NAME_MAX: usize = 32;
+
+/// 本引擎实例的 HELLO 序号。64 位随机足够：它只需要把"同一次启动的重投"与"新一次启动"分开。
+fn random_hello_seq() -> u64 {
+    u64::from_be_bytes(linkx_crypto::random_bytes())
+}
+
+/// 按字节上限截断但不切断一个字符：`Vec<u8>::truncate` 会把多字节字符砍成半个，
+/// 对端 `String::from_utf8` 一验就失败，整台设备的名字变成空的。
+fn truncate_name(s: &str, max_bytes: usize) -> Vec<u8> {
+    let mut end = s.len().min(max_bytes);
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.as_bytes()[..end].to_vec()
+}
 /// 握手完成后等待对端 IDENTITY 的时限（BLE 分片下 ~550B 载荷 + RSA 生成余量）
 pub const IDENTITY_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(20);
 /// TCP 连接已建立、但对方一直不发 `CHANNEL_BIND` 的时限。**没有它会永久占死唯一的槽位**：
@@ -305,6 +320,9 @@ pub enum EngineEvent {
         /// 手机当前媒体音量 0-100（电脑侧 +/- 以此为基准，不自己记账）
         volume: i32,
     },
+    /// 对端（手机）当前曲目的封面。**只可能经局域网到达**（纯蓝牙时手机端就不发），
+    /// `track_key` 原样带回，收端据此确认"这张图属于现在这首歌"，不靠到达顺序猜。
+    MediaCover { track_key: String, jpeg: Vec<u8> },
     /// 对端（电脑）下发的播放控制指令，由平台层执行。
     MediaCommand {
         /// `media_command::Action` 的值（0=PLAY_PAUSE … 8=SET_VOLUME）
@@ -392,7 +410,6 @@ pub struct SessionEngine {
     mgr: SessionManager,
     reasm: BleReassembler,
     hs: Option<NoiseXxHandshake>,
-    hs_reads: u8,
     hs_writes: u8,
 
     session_key: Option<[u8; 32]>,
@@ -469,6 +486,11 @@ pub struct SessionEngine {
     hello_received: bool,
     /// 是否已应答过对端 HELLO（请求/应答语义，每会话一次）
     hello_replied: bool,
+    /// 本端 HELLO 的序号：起点随机，每发一条前进 1。对端用它分辨"同一条 HELLO 被重投"
+    /// 与"对端要重开会话"（真重启、或断线后重新贴上来）——前者的字节与上次一模一样。
+    hello_seq: u64,
+    /// 本端**已经处理过**的那条对端 HELLO 的序号（跨本端复位保留：它说的是对端发的那一条）
+    peer_hello_seq: Option<u64>,
     peer_done_verified: bool,
     last_rx: Option<Instant>,
     last_ping_at: Option<Instant>,
@@ -500,7 +522,6 @@ impl SessionEngine {
             mgr: SessionManager::new(SessionChannel::Ble),
             reasm: BleReassembler::new(),
             hs: None,
-            hs_reads: 0,
             hs_writes: 0,
             session_key: None,
             session_id: [0u8; 16],
@@ -539,6 +560,8 @@ impl SessionEngine {
             hello_sent: false,
             hello_received: false,
             hello_replied: false,
+            hello_seq: random_hello_seq(),
+            peer_hello_seq: None,
             peer_done_verified: false,
             last_rx: None,
             last_ping_at: None,
@@ -740,7 +763,8 @@ impl SessionEngine {
 
     /// 喂入 TCP 通道收到的完整帧字节（平台层从 socket 读取）
     pub fn feed_tcp(&mut self, frame: &[u8], now: Instant) {
-        self.last_rx = Some(now);
+        // 只记 TCP 侧的时间戳：`last_rx` 是 **BLE** 的存活判据，被 TCP 流量顶掉的话，
+        // "蓝牙断了但局域网还在跑"会被误判成健康，BLE 那侧就再也不会超时重连。
         self.last_tcp_rx = Some(now);
         self.on_frame(frame, true);
     }
@@ -1009,6 +1033,17 @@ impl SessionEngine {
                     // 绑定期到达的业务帧在此原序补投，否则就是"对端已发、我这边凭空少一条"
                     self.drain_tcp_prebind();
                 }
+                // 绑定早已完成又收到 proof（重复投递或迟到的一份）：保持现有绑定。
+                // 把它当失败会**把刚建立的健康局域网拆掉**；nonce 路径在 `on_tcp_payload`
+                // 里已经做了幂等区分，proof 路径此前漏了这一步。
+                Err(crate::binding::BindError::AlreadyBound) => {
+                    debuglog::log!(
+                        Level::Info,
+                        "session",
+                        "tcp.proof_repeat",
+                        &[("kept", "bound")]
+                    );
+                }
                 Err(e) => {
                     self.emit_error(
                         err_code::IO_GENERIC,
@@ -1206,7 +1241,6 @@ impl SessionEngine {
     /// 清空会话中间态（握手/密钥/序号/重放窗口/配对），保留配置、长期身份与状态机。
     fn reset_session_payload(&mut self) {
         self.hs = None;
-        self.hs_reads = 0;
         self.hs_writes = 0;
         self.session_key = None;
         self.session_id = [0u8; 16];
@@ -1221,6 +1255,9 @@ impl SessionEngine {
         self.peer_confirm_seen = false;
         self.peer_name = None;
         self.peer_static_fp = None;
+        // 未走完的身份漂移不能留到下一条会话：它是"这一次要淘汰哪条旧记录"的凭据，
+        // 用户没确认就换了别的设备配对，留着会让下一次 learn_trusted 静默淘汰无关的条目。
+        self.drift_old_fp = None;
         self.send_seq = 1;
         self.hs_seq = 0;
         self.recv_window = ReplayWindow::default();
@@ -1256,12 +1293,15 @@ impl SessionEngine {
     }
 
     fn send_hello(&mut self) {
-        let mut name = self.cfg.local_name.as_bytes().to_vec();
-        name.truncate(HELLO_NAME_MAX);
+        // 每发一条前进一次：本端"重新贴上来"的那次 HELLO 必须与上一条不同号，
+        // 而对端把同一条重投回来时字节不变，正好用来判重。
+        self.hello_seq = self.hello_seq.wrapping_add(1);
+        let name = truncate_name(&self.cfg.local_name, HELLO_NAME_MAX);
         let body = tlv_codec::encode(&[
             Tlv::buf(TAG_ADVERT_NAME, &name),
             Tlv::u8(TAG_OS, self.cfg.os),
             Tlv::buf(TAG_VERSION, self.cfg.version.as_bytes()),
+            Tlv::buf(TAG_HELLO_SEQ, &self.hello_seq.to_be_bytes()),
         ])
         .unwrap_or_else(|_| {
             tlv_codec::encode(&[Tlv::u8(TAG_OS, self.cfg.os)]).expect("单 TLV 必然可编码")
@@ -1513,7 +1553,17 @@ impl SessionEngine {
         let name = tlv_codec::get(body, TAG_ADVERT_NAME)
             .ok()
             .flatten()
-            .and_then(|v| String::from_utf8(v.to_vec()).ok())
+            // 收端也按同一个上限截：发端截断只说明"我不会发长的"，不说明"我收到的不会长"。
+            // 截的时候退到一个字符的开头，劈开多字节字符会让对端名字整个变成空的。
+            .map(|mut v| {
+                let mut end = v.len().min(HELLO_NAME_MAX);
+                while end > 0 && end < v.len() && (v[end] & 0xC0) == 0x80 {
+                    end -= 1;
+                }
+                v.truncate(end);
+                v
+            })
+            .and_then(|v| String::from_utf8(v).ok())
             .unwrap_or_default();
         let os = tlv_codec::get(body, TAG_OS)
             .ok()
@@ -1525,11 +1575,18 @@ impl SessionEngine {
             .flatten()
             .and_then(|v| String::from_utf8(v.to_vec()).ok())
             .unwrap_or_default();
+        // 对端这一次 HELLO 的序号（旧版本不带这个 tag → None）
+        let seq = tlv_codec::get(body, TAG_HELLO_SEQ)
+            .ok()
+            .flatten()
+            .and_then(|v| <[u8; 8]>::try_from(v).ok())
+            .map(u64::from_be_bytes);
         // 已定型状态（已配对 / 重连中 / 已关闭）又收到 HELLO → 对端发起了**新会话**（例如它
         // 重建了引擎）。必须复位再走一遍握手，否则本端以「旧会话状态」忽略新握手 → 双方卡死；
         // 处于 Handshake / Pairing / SasCompare（进行中）时不复位，那多半是重复 HELLO。
-        // ⚠ 缺口："对端真的重启"与"上一条 HELLO 迟到重投"字节完全一样，这里区分不了；正解是给
-        // HELLO 加会话 / 启动序号。目前不致命：误回 DISCOVER 后 `tick_discover` 会重播自愈。
+        // 序号解决的是"同一条 HELLO 被重投两次"：字节没变的那条不复位（复位会把在途传输打死）。
+        // **没解决**另一件事：局域网里任意主机发个 HELLO（换个序号、或干脆不带序号）照样能把
+        // 已配对会话打回 DISCOVER。要免疫那个，复位得走认证路径，属于协议级改动，另案。
         if self.hello_received && self.session_settled() {
             if self.mgr.state == SessionState::Reconnecting {
                 // 本端处于重连退避时见到对端 → 判定重连成功（RECONNECTING → HANDSHAKE）
@@ -1537,10 +1594,21 @@ impl SessionEngine {
                 self.reconnect_backoff.reset();
                 self.reconnect_next_at = None;
                 self.transition(SessionEvent::ReconnectSucceeded);
+            } else if seq.is_some() && seq == self.peer_hello_seq {
+                debuglog::log!(
+                    Level::Info,
+                    "session",
+                    "peer.hello_repeat",
+                    &[("reset", "skipped")]
+                );
             } else {
                 // PAIRED / CLOSED：整场会话作废，回到 DISCOVER 重新开始
                 self.reset_session();
             }
+        }
+        if seq.is_some() {
+            // 记下对端实例序号：本端复位不能把它一起清掉，它标识的是**对端**那个实例
+            self.peer_hello_seq = seq;
         }
         if !self.hello_received {
             self.hello_received = true;
@@ -1646,7 +1714,6 @@ impl SessionEngine {
         if !read_ok {
             return;
         }
-        self.hs_reads += 1;
         if self.hs.as_ref().is_some_and(|h| h.is_done()) {
             self.finish_handshake();
             return;
@@ -1659,7 +1726,7 @@ impl SessionEngine {
     /// 「信任裁决」不在此处做，等双方 IDENTITY 交换、验签通过后（[`Self::maybe_complete_identity`]）
     /// 再判：把**持久身份**绑定到**本次握手哈希**，中间人无法用旧公钥顶替（签名覆盖 hash_h）。
     fn finish_handshake(&mut self) {
-        let Some(hs) = self.hs.as_ref() else {
+        let Some(hs) = self.hs.as_mut() else {
             return;
         };
         let (hash, peer_static) = match hs.finish() {
@@ -1669,7 +1736,16 @@ impl SessionEngine {
                 return;
             }
         };
-        let key = derive_session_key(&hash);
+        // 会话密钥的 ikm 必须是 DH 出来的秘密（Split(ck) 的两把传输密钥），握手哈希只做 salt：
+        // `h` 全由线路字节算出，录到包的人能自己重算，拿它当 ikm 等于链路上没有加密。
+        let transport = match hs.transport_split() {
+            Ok(t) => t,
+            Err(e) => {
+                self.emit_error(err_code::IO_GENERIC, format!("会话密钥派生失败: {e}"));
+                return;
+            }
+        };
+        let key = derive_session_key(&hash, (&transport.0, &transport.1));
         let sid_hash = {
             let mut h = Sha256::new();
             h.update(b"linkx/v1/session-id");
@@ -1724,7 +1800,13 @@ impl SessionEngine {
             self.emit_error(err_code::IDENTITY_VERIFY_FAILED, "本机身份签名失败");
             return;
         };
-        let body = encode_identity_payload(&pk, &sig);
+        let Some(body) = encode_identity_payload(&pk, &sig) else {
+            self.emit_error(
+                err_code::IDENTITY_VERIFY_FAILED,
+                "本机身份载荷超出长度前缀上限",
+            );
+            return;
+        };
         let _ = self.send_encrypted(MSG_IDENTITY, &body);
     }
 
@@ -1984,6 +2066,18 @@ impl SessionEngine {
         };
         // 认证通过 → 提交窗口（此刻才登记，防伪造帧推窗）
         self.recv_window.commit(header.seq);
+        // 握手完成 ≠ 配对完成：拿到会话密钥不等于本端接受了她。配对协议自身的三条消息必须
+        // 在 PAIRED 之前放行，其余业务消息一律先拒 —— 门禁统一放在分派入口，各处理器里原有的
+        // 具体措辞（"播放指令未执行"之类）退为二次防线；以后新增消息类型不必记得再补一次。
+        if !self.is_paired()
+            && !matches!(
+                header.msg_type,
+                MSG_IDENTITY | MSG_PAIR_CONFIRM | MSG_PAIR_DONE
+            )
+        {
+            self.emit_error(err_code::IO_GENERIC, "尚未配对，业务消息未采纳");
+            return;
+        }
         match header.msg_type {
             MSG_IDENTITY => self.on_identity(&plaintext),
             MSG_PAIR_CONFIRM => self.on_pair_confirm(header.seq, &plaintext),
@@ -1995,6 +2089,7 @@ impl SessionEngine {
             msg_type::CLIPBOARD_PUSH => self.on_clipboard_push(&plaintext),
             msg_type::MEDIA_STATE => self.on_media_state(&plaintext),
             msg_type::MEDIA_COMMAND => self.on_media_command(&plaintext),
+            msg_type::MEDIA_COVER => self.on_media_cover(&plaintext),
             msg_type::DEVICE_STATUS => self.on_device_status(&plaintext),
             msg_type::FILE_META => self.on_file_meta(&plaintext),
             msg_type::FILE_CHUNK => self.on_file_chunk(&plaintext),
@@ -2131,6 +2226,9 @@ impl SessionEngine {
             (Some(_), Some(_)) => {
                 self.transition(SessionEvent::SasRejected);
                 self.emit_error(err_code::IO_GENERIC, "PAIR_CONFIRM 的 SAS 与本端不一致");
+                // 与用户手点「拒绝」同口径：密钥一并丢掉。否则状态已经判死，会话密钥还在，
+                // 之后到达的业务帧仍能被解开并被采纳（终态成了摆设）。
+                self.session_key = None;
                 return;
             }
             _ => return,
@@ -2165,12 +2263,10 @@ impl SessionEngine {
         }
     }
 
-    /// 本端 RSA 身份指纹（PAIR_DONE 载荷校验基准）
-    fn own_fingerprint(&self) -> String {
-        self.identity
-            .as_ref()
-            .and_then(|i| i.fingerprint().ok())
-            .unwrap_or_default()
+    /// 本端 RSA 身份指纹（PAIR_DONE 载荷校验基准）。取不到就是 `None`：把它折叠成空串
+    /// 会让"对端声明了一个空指纹"等于校验通过。
+    fn own_fingerprint(&self) -> Option<String> {
+        self.identity.as_ref().and_then(|i| i.fingerprint().ok())
     }
 
     fn on_pair_done(&mut self, _seq: u32, plaintext: &[u8]) {
@@ -2186,7 +2282,11 @@ impl SessionEngine {
                 return;
             }
         };
-        if self.own_fingerprint() == fp {
+        let Some(own) = self.own_fingerprint() else {
+            self.emit_error(err_code::IO_GENERIC, "本机身份不可用，PAIR_DONE 未采纳");
+            return;
+        };
+        if own == fp {
             self.peer_done_verified = true;
         } else {
             self.emit_error(
@@ -2683,6 +2783,38 @@ impl SessionEngine {
         self.send_routed(msg_type::MEDIA_STATE, &s.encode_to_vec(), now_ms, false)
     }
 
+    /// 推送当前曲目的封面（手机 → 电脑）：**只在局域网已绑定时发，纯蓝牙时静默不发**。
+    ///
+    /// 与相册不同，这里不发出去不该报错：封面是锦上添花，蓝牙链路也能把"在放什么"送达到，
+    /// 只是送不动几十 KB 的图。为它弹一条"发送失败"会让用户以为功能坏了。
+    pub fn send_media_cover(&mut self, c: &MediaCover, now_ms: i64) -> bool {
+        if !self.is_paired() || !self.tcp_bound {
+            debuglog::log!(
+                Level::Info,
+                "session",
+                "media.cover.skip",
+                &[("tcp_bound", if self.tcp_bound { "1" } else { "0" })]
+            );
+            return false;
+        }
+        if c.jpeg.len() > linkx_protocol::MEDIA_COVER_MAX_JPEG {
+            // 手机侧自己就该压到 32 KB 以内；走到这里说明发端写错了，拒发并出声
+            self.emit_error(
+                err_code::IO_GENERIC,
+                format!(
+                    "封面超限：{} 字节，上限 {}，未发送",
+                    c.jpeg.len(),
+                    linkx_protocol::MEDIA_COVER_MAX_JPEG
+                ),
+            );
+            return false;
+        }
+        let msg_id = self.next_msg_id();
+        let src = self.local_dev_id();
+        let payload = envelope::encode(&msg_id, now_ms, &src, &c.encode_to_vec());
+        self.send_encrypted_tcp(msg_type::MEDIA_COVER, &payload)
+    }
+
     /// 下发播放控制指令（电脑 → 手机），由对端平台层执行。路由用 `send_routed` 而不是蓝牙
     /// 独占：**手机退到后台时最先没的就是这条 BLE 链路**（会换地址、会掐广播），局域网 socket
     /// 照常活着；钉在蓝牙上等于"只在 App 前台时可控制"。指令几十字节，不抢文件带宽。
@@ -2742,6 +2874,42 @@ impl SessionEngine {
                 volume: s.volume,
             }),
             Err(e) => self.emit_error(err_code::IO_GENERIC, format!("播放状态解析失败: {e}")),
+        }
+    }
+
+    /// 收到封面。超过上限就整条拒绝并报错：手机端自己压到 32 KB 以内，收到更大的只有两种
+    /// 解释——对端是别的版本，或有人在往这一帧里塞数据。两种都不该默默收下。
+    fn on_media_cover(&mut self, plaintext: &[u8]) {
+        if !self.is_paired() {
+            self.emit_error(err_code::IO_GENERIC, "尚未配对，封面未采纳");
+            return;
+        }
+        let env = match envelope::decode(plaintext) {
+            Ok(e) => e,
+            Err(e) => {
+                self.emit_error(err_code::IO_GENERIC, format!("封面信封解析失败: {e}"));
+                return;
+            }
+        };
+        match MediaCover::decode(env.body.as_ref()) {
+            Ok(c) if c.jpeg.len() > linkx_protocol::MEDIA_COVER_MAX_JPEG => self.emit_error(
+                err_code::IO_GENERIC,
+                format!(
+                    "封面超限：{} 字节，上限 {}，已丢弃",
+                    c.jpeg.len(),
+                    linkx_protocol::MEDIA_COVER_MAX_JPEG
+                ),
+            ),
+            // 键太长就不是键了：那是有人拿它当正文使，正文不该从这条通道进来
+            Ok(c) if c.track_key.len() > linkx_protocol::MEDIA_TRACK_KEY_MAX => self.emit_error(
+                err_code::IO_GENERIC,
+                format!("封面归属键超长：{} 字节，已丢弃", c.track_key.len()),
+            ),
+            Ok(c) => self.emit(EngineEvent::MediaCover {
+                track_key: c.track_key,
+                jpeg: c.jpeg.to_vec(),
+            }),
+            Err(e) => self.emit_error(err_code::IO_GENERIC, format!("封面解析失败: {e}")),
         }
     }
 
@@ -5399,6 +5567,77 @@ mod tests {
         );
     }
 
+    /// 封面是媒体类里唯一有体积的一条，规矩有两条：**纯蓝牙不发**（发了也传不动，
+    /// 还会挤掉通知与剪贴板），**超限不发**（不能让对方用一帧撑爆内存）。
+    #[test]
+    fn media_cover_is_lan_only_and_size_capped() {
+        let t = now();
+        const TM: i64 = 1_790_000_000_000;
+        let cover = |n: usize| MediaCover {
+            track_key: "com.netease.cloudmusic|夜曲|周杰伦".into(),
+            jpeg: vec![0x5Au8; n].into(),
+        };
+
+        // 已配对、局域网未绑定：不发，也不往蓝牙队列里塞
+        let (mut win, mut and) = pair_engines(None, None);
+        win.start(t);
+        and.start(t);
+        pump(&mut win, &mut and, t, 64);
+        win.confirm_sas();
+        and.confirm_sas();
+        pump(&mut win, &mut and, t, 16);
+        assert!(win.is_paired() && and.is_paired());
+        assert!(!and.is_tcp_bound(), "这一步的前提是没绑局域网");
+        assert!(
+            !and.send_media_cover(&cover(1024), TM),
+            "纯蓝牙时封面不得发出"
+        );
+        assert!(and.take_outbound().is_empty(), "封面也不得降级走蓝牙队列");
+
+        // 绑定后：原样送达，key 与字节都对得上
+        let (mut win, mut and) = paired_and_bound();
+        let _ = drain_events(&mut win);
+        let _ = drain_events(&mut and);
+        assert!(and.send_media_cover(&cover(2048), TM), "已绑定时封面应发出");
+        let out = and.take_tcp_outbound();
+        assert!(
+            out.iter().any(|f| matches!(parse_full_frame(f), Ok((h, _))
+                if h.msg_type == msg_type::MEDIA_COVER)),
+            "封面应排进 TCP 队列"
+        );
+        for f in &out {
+            win.feed_tcp(f, t);
+        }
+        let got = drain_events(&mut win)
+            .into_iter()
+            .find_map(|e| match e {
+                EngineEvent::MediaCover { track_key, jpeg } => Some((track_key, jpeg)),
+                _ => None,
+            })
+            .expect("电脑侧应收到 MediaCover");
+        assert_eq!(got.0, "com.netease.cloudmusic|夜曲|周杰伦");
+        assert_eq!(got.1.len(), 2048);
+
+        // 超限：**发端就不发**（收端那道闸门对的是"对端是别的版本或在塞数据"，
+        // 构造一条合法加密的超限入站帧要绕过发送口，与剪贴板那条同判据，不重复造）
+        let _ = drain_events(&mut and);
+        assert!(
+            !and.send_media_cover(&cover(49 * 1024), TM),
+            "超限封面不得从本机发出"
+        );
+        assert!(
+            and.take_tcp_outbound().is_empty(),
+            "超限封面不得排进 TCP 队列"
+        );
+        assert!(
+            drain_events(&mut and).iter().any(|e| matches!(
+                e,
+                EngineEvent::Error { context, .. } if context.contains("封面超限")
+            )),
+            "拒发要留下可读的错误"
+        );
+    }
+
     /// 相册契约：问与答各走一次局域网 TCP，两端拿到的都是**类型明确**的事件。
     #[test]
     fn album_list_and_thumb_round_trip_over_tcp() {
@@ -5739,5 +5978,523 @@ mod tests {
                 .any(|e| matches!(e, EngineEvent::MediaCommand { .. })),
             "配对完成后播放指令必须照常送达"
         );
+    }
+
+    /// 握手完成 ≠ 配对完成：本端还没核对 SAS，对端就不能推通知、写剪贴板、开始往磁盘落文件。
+    /// 门禁在 `on_encrypted` 的分派入口统一把关，这里把每条业务消息都过一遍。
+    /// 相册五条不在列：它们只走局域网 TCP，而未配对的一方连 TCP 都绑不上（`begin_tcp_binding`
+    /// 就挡着），帧只会进绑定前的暂存队列 —— 那条路径另有测试守着。
+    #[test]
+    fn business_messages_are_not_processed_before_local_side_paired() {
+        let t = now();
+        const TM: i64 = 1_790_000_000_000;
+        let file_id = 0x0A0B_0C0Du64;
+        let payload: Vec<u8> = vec![7u8; 64];
+        let meta = || FileMeta {
+            name: "报告.pdf".into(),
+            size: payload.len() as u64,
+            file_id,
+            chunk_size: 262_144,
+            sha256: vec![0x11; 32].into(),
+            crc32: 0,
+            album_id: 0,
+        };
+
+        // 只让电脑完成人工比对：手机停在 SasCompare，两边都已握手、都握有会话密钥
+        let (mut win, mut and) = pair_engines(None, None);
+        win.start(t);
+        and.start(t);
+        pump(&mut win, &mut and, t, 32);
+        win.confirm_sas();
+        pump(&mut win, &mut and, t, 32);
+        assert!(
+            win.is_paired() && !and.is_paired(),
+            "前提：只有一端完成了人工比对"
+        );
+        let _ = drain_events(&mut win);
+        let _ = drain_events(&mut and);
+
+        /// 电脑发的那条已被手机收到：不得产出业务事件，但必须大声报错（不许静默丢）
+        fn refused(
+            win: &mut SessionEngine,
+            and: &mut SessionEngine,
+            t: Instant,
+            what: &str,
+            leaks: impl Fn(&EngineEvent) -> bool,
+        ) {
+            for p in win.take_outbound() {
+                and.feed(&p, t);
+            }
+            let evs = drain_events(and);
+            assert!(!evs.iter().any(&leaks), "未配对的一侧不得采纳 {}", what);
+            assert!(
+                has_error(&evs, err_code::IO_GENERIC),
+                "{} 被拒必须大声报错，不能静默丢",
+                what
+            );
+        }
+
+        assert!(win.send_notification(
+            &NotificationPush {
+                package: "com.example.chat".into(),
+                title: "小明".into(),
+                text: "在吗？".into(),
+                post_ts_ms: TM,
+                key_hash: 7,
+                cover_jpeg: Default::default(),
+                tag: "chat".into(),
+                notification_id: 21,
+                can_reply: false,
+                reply_action_index: 0,
+                reply_result_key: String::new(),
+            },
+            TM
+        ));
+        refused(&mut win, &mut and, t, "NOTIFY_PUSH", |e| {
+            matches!(e, EngineEvent::Notification { .. })
+        });
+
+        assert!(win.send_notify_dismiss(
+            &NotificationDismiss {
+                package: "com.example.chat".into(),
+                tag: "chat".into(),
+                notification_id: 21,
+                key_hash: 7,
+            },
+            TM
+        ));
+        refused(&mut win, &mut and, t, "NOTIFY_DISMISS", |e| {
+            matches!(e, EngineEvent::NotifyDismissed { .. })
+        });
+
+        assert!(win.send_notify_reply_ack(
+            &NotificationReplyAck {
+                reply_id: 3,
+                package: "com.example.chat".into(),
+                ok: true,
+                error: String::new(),
+            },
+            TM
+        ));
+        refused(&mut win, &mut and, t, "NOTIFY_REPLY_ACK", |e| {
+            matches!(e, EngineEvent::NotifyReplyAck { .. })
+        });
+
+        assert!(win.send_clipboard_text("未配对就想写我剪贴板", TM));
+        refused(&mut win, &mut and, t, "CLIPBOARD_PUSH", |e| {
+            matches!(e, EngineEvent::Clipboard { .. })
+        });
+
+        assert!(win.send_file_meta(&meta(), TM));
+        refused(&mut win, &mut and, t, "FILE_META", |e| {
+            matches!(e, EngineEvent::FileMetaReceived { .. })
+        });
+
+        // FILE_CHUNK 的出口不是事件而是待写分块：上一条 META 已把发端通道钉住，这里单独验
+        assert!(win.send_file_chunk(file_id, 0, crc32_of(&payload), &payload, TM));
+        for p in win.take_outbound() {
+            and.feed(&p, t);
+        }
+        assert!(and.take_chunks().is_empty(), "未配对的一侧不得接收文件分块");
+        assert!(
+            has_error(&drain_events(&mut and), err_code::IO_GENERIC),
+            "FILE_CHUNK 被拒必须大声报错"
+        );
+
+        assert!(win.send_file_done(file_id, true, None, TM));
+        refused(&mut win, &mut and, t, "FILE_DONE", |e| {
+            matches!(e, EngineEvent::FileDoneReceived { .. })
+        });
+
+        assert!(win.send_file_cancel(file_id, "对端取消", TM));
+        refused(&mut win, &mut and, t, "FILE_CANCEL", |e| {
+            matches!(e, EngineEvent::FileTaskCancelled { .. })
+        });
+
+        assert!(win.send_file_resume(file_id, 3, TM));
+        refused(&mut win, &mut and, t, "RESUME", |e| {
+            matches!(e, EngineEvent::FileResumeRequested { .. })
+        });
+
+        // 反向对照：手机核对完 SAS，同一条链路上的剪贴板必须照常送达（证明上面没把通道弄坏）
+        and.confirm_sas();
+        pump(&mut win, &mut and, t, 32);
+        assert!(and.is_paired(), "手机核对 SAS 后应进入 Paired");
+        let _ = drain_events(&mut win);
+        let _ = drain_events(&mut and);
+        assert!(win.send_clipboard_text("配对之后就正常了", TM));
+        for p in win.take_outbound() {
+            and.feed(&p, t);
+        }
+        assert!(
+            drain_events(&mut and).iter().any(|e| matches!(
+                e,
+                EngineEvent::Clipboard { text } if text == "配对之后就正常了"
+            )),
+            "配对完成后业务消息必须照常采纳"
+        );
+    }
+    /// HELLO 的序号只用来认"是不是同一条"：已经处理过的那条再投一次，不该把会话第二次打死；
+    /// 序号变了（对端真重启、或断线后重新贴上来）才复位重握手。
+    #[test]
+    fn duplicated_hello_does_not_reset_the_session_twice() {
+        fn hello_body(seq: Option<u64>) -> Vec<u8> {
+            let mut items = vec![
+                Tlv::buf(TAG_ADVERT_NAME, b"pixel-7"),
+                Tlv::u8(TAG_OS, linkx_protocol::OS_ANDROID),
+                Tlv::buf(TAG_VERSION, b"0.5.1"),
+            ];
+            if let Some(s) = seq {
+                items.push(Tlv::buf(TAG_HELLO_SEQ, &s.to_be_bytes()));
+            }
+            tlv_codec::encode(&items).unwrap()
+        }
+
+        let t = now();
+        let (mut win, mut and) = pair_engines(None, None);
+        win.start(t);
+        and.start(t);
+        pump(&mut win, &mut and, t, 32);
+        win.confirm_sas();
+        and.confirm_sas();
+        pump(&mut win, &mut and, t, 32);
+        assert!(win.is_paired() && and.is_paired(), "前提：两端都已配对");
+
+        let seq = 0x1122_3344_5566_7788u64;
+        // 本端已经处理过序号为 seq 的那一条（配对过程中收到的）
+        win.peer_hello_seq = Some(seq);
+        // ① 同一条迟到重投：会话保持，密钥还在，记下的序号也不该被改写
+        win.on_hello(&hello_body(Some(seq)));
+        assert!(win.is_paired(), "同一条 HELLO 的重投不得作废会话");
+        assert!(win.session_key.is_some(), "重投之后会话密钥应还在");
+        assert_eq!(win.peer_hello_seq, Some(seq), "重投不该改写已记下的序号");
+
+        // ② 序号变了 = 对端要重开会话 → 复位，回 DISCOVER 重握手
+        win.on_hello(&hello_body(Some(seq + 1)));
+        assert!(
+            !win.is_paired(),
+            "新一次 HELLO 必须让本端复位，否则两边各抱着旧会话卡死"
+        );
+        assert_eq!(win.peer_hello_seq, Some(seq + 1));
+    }
+
+    /// 旧版本对端的 HELLO 没有序号：只能按老办法每次当新会话（兼容优先）
+    #[test]
+    fn legacy_hello_without_seq_still_resets() {
+        let t = now();
+        let (mut win, mut and) = pair_engines(None, None);
+        win.start(t);
+        and.start(t);
+        pump(&mut win, &mut and, t, 32);
+        win.confirm_sas();
+        and.confirm_sas();
+        pump(&mut win, &mut and, t, 32);
+        assert!(win.is_paired(), "前提：两端都已配对");
+        let legacy = tlv_codec::encode(&[
+            Tlv::buf(TAG_ADVERT_NAME, b"old-phone"),
+            Tlv::u8(TAG_OS, linkx_protocol::OS_ANDROID),
+            Tlv::buf(TAG_VERSION, b"0.4.5"),
+        ])
+        .unwrap();
+        let before = win.peer_hello_seq;
+        win.on_hello(&legacy);
+        assert!(
+            !win.is_paired(),
+            "无序号的旧式 HELLO 仍触发复位（保持旧行为）"
+        );
+        assert_eq!(
+            win.peer_hello_seq, before,
+            "旧式 HELLO 没有序号，不该改写已记下的对端序号"
+        );
+    }
+
+    /// TCP 的流量只推进 TCP 自己的计时，不顶掉 BLE 的存活判据 —— 否则"蓝牙已断、局域网还活着"
+    /// 会被读成两条链路都健康，BLE 那侧永远等不到超时重连。
+    #[test]
+    fn tcp_traffic_does_not_keep_the_ble_liveness_clock() {
+        let t = now();
+        let (mut win, mut and) = paired_and_bound();
+        assert!(
+            win.is_tcp_bound() && and.is_tcp_bound(),
+            "前提：局域网已绑定"
+        );
+        let ble_before = win.last_rx;
+
+        // TCP 侧来回一趟心跳（心跳节奏 10s，取刚过一次的点）
+        let t2 = t + Duration::from_secs(11);
+        win.tick(t2);
+        pump_tcp(&mut win, &mut and, t2, 4);
+        assert_eq!(win.last_rx, ble_before, "TCP 帧不该刷新 BLE 的活跃时间");
+        assert_eq!(win.last_tcp_rx, Some(t2), "TCP 侧的活跃时间应照常推进");
+    }
+
+    /// 未走完的身份漂移不能跨会话残留：它是"这一次要淘汰哪条旧记录"的凭据，用户没确认就
+    /// 去配别的设备，留着会让下一次 `learn_trusted()` 静默淘汰那条无关的信任记录。
+    #[test]
+    fn abandoned_identity_drift_does_not_survive_the_session() {
+        let t = now();
+        let (mut win, mut and) = pair_engines(None, None);
+        win.start(t);
+        and.start(t);
+        pump(&mut win, &mut and, t, 32);
+        win.confirm_sas();
+        and.confirm_sas();
+        pump(&mut win, &mut and, t, 32);
+        assert!(win.is_paired() && and.is_paired(), "前提：两端都已配对");
+        let peer_fp = win.peer_fp.clone().expect("已配对应有对端指纹");
+        assert!(
+            win.cfg
+                .trusted_peers
+                .iter()
+                .any(|p| p.fingerprint == peer_fp),
+            "配对完成应写入信任库"
+        );
+
+        // 身份漂移挂起（用户还没点「重新配对」），随后本端复位重来
+        win.drift_old_fp = Some(peer_fp.clone());
+        win.reset_session();
+        assert!(
+            win.drift_old_fp.is_none(),
+            "复位必须清掉未消费的漂移凭据，否则会带走无关设备的信任记录"
+        );
+
+        // 复位后与另一台新设备完成配对：原那条记录不该被顺手淘汰
+        let (mut win2, mut and2) = pair_engines(None, None);
+        win2.start(t);
+        and2.start(t);
+        pump(&mut win2, &mut and2, t, 32);
+        win2.confirm_sas();
+        and2.confirm_sas();
+        pump(&mut win2, &mut and2, t, 32);
+        win2.cfg.trusted_peers.insert(
+            0,
+            TrustedPeer {
+                fingerprint: peer_fp.clone(),
+                name: "旧手机".into(),
+            },
+        );
+        let before = win2.cfg.trusted_peers.len();
+        win2.learn_trusted("ffffffffffffffff".into());
+        assert_eq!(
+            win2.cfg.trusted_peers.len(),
+            before + 1,
+            "新身份只该新增一条，不该淘汰未确认漂移的旧条目"
+        );
+        assert!(win2
+            .cfg
+            .trusted_peers
+            .iter()
+            .any(|p| p.fingerprint == peer_fp));
+    }
+
+    /// 重复/迟到的 BLE proof 不该拆掉已经建好的局域网绑定：`verify_ble_proof` 第一步就按
+    /// "已 Bound"判 `AlreadyBound`，这不是冒充，是同一份证明的第二次到达。
+    #[test]
+    fn duplicate_ble_proof_keeps_the_healthy_tcp_binding() {
+        let (mut win, _and) = paired_and_bound();
+        assert!(win.is_tcp_bound(), "前提：局域网已绑定");
+        let _ = drain_events(&mut win);
+
+        win.on_channel_bind(&[linkx_protocol::TAG_NONCE_TCP, 0], false);
+        assert!(win.is_tcp_bound(), "重复 proof 不该拆掉健康的局域网绑定");
+        assert!(
+            !drain_events(&mut win)
+                .iter()
+                .any(|e| matches!(e, EngineEvent::Error { .. })),
+            "重复 proof 不该报成绑定失败"
+        );
+    }
+
+    /// 真冒充（nonce 对不上）仍然必须当场拆链
+    #[test]
+    fn forged_ble_proof_still_breaks_the_binding() {
+        let t = now();
+        let (mut win, mut and) = pair_engines(None, None);
+        win.start(t);
+        and.start(t);
+        pump(&mut win, &mut and, t, 32);
+        win.confirm_sas();
+        and.confirm_sas();
+        pump(&mut win, &mut and, t, 32);
+        assert!(win.begin_tcp_binding(BindRole::TcpClient));
+        assert!(and.begin_tcp_binding(BindRole::TcpServer));
+        pump_tcp(&mut win, &mut and, t, 16);
+        pump(&mut win, &mut and, t, 16);
+        assert!(win.is_tcp_bound(), "前提：正常绑定已完成");
+        let _ = drain_events(&mut win);
+
+        // 已 Bound 之后再来一份**内容不同**的 proof：仍是 AlreadyBound（先查状态再解析），
+        // 而绑定未完成时的伪造 proof 走 TagMismatch 分支，下面这条用例覆盖后者
+        let (mut w2, mut a2) = pair_engines(None, None);
+        w2.start(t);
+        a2.start(t);
+        pump(&mut w2, &mut a2, t, 32);
+        w2.confirm_sas();
+        a2.confirm_sas();
+        pump(&mut w2, &mut a2, t, 32);
+        assert!(w2.begin_tcp_binding(BindRole::TcpClient));
+        assert!(a2.begin_tcp_binding(BindRole::TcpServer));
+        pump_tcp(&mut w2, &mut a2, t, 16);
+        let _ = drain_events(&mut w2);
+        // 伪造一份 proof：nonce 用 w2 发出去的那条（已通过 TCP 交换拿到），tag 乱填
+        w2.on_channel_bind(
+            &[
+                linkx_protocol::TAG_NONCE_TCP,
+                8,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                8,
+                linkx_protocol::TAG_BIND_TAG,
+                16,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ],
+            false,
+        );
+        assert!(
+            !w2.is_tcp_bound(),
+            "未完成状态收到伪造 proof 必须拒绝，且不得置为已绑定"
+        );
+        assert!(
+            drain_events(&mut w2)
+                .iter()
+                .any(|e| matches!(e, EngineEvent::Error { .. })),
+            "伪造 proof 必须大声报错"
+        );
+    }
+
+    /// SAS 判不一致之后必须丢掉会话密钥：状态迁移只是"不再采纳业务消息"，
+    /// 密钥留着等于链路层面还能被继续解密的既成事实。
+    #[test]
+    fn sas_mismatch_clears_the_session_key() {
+        let t = now();
+        let (mut win, mut and) = pair_engines(None, None);
+        win.start(t);
+        and.start(t);
+        pump(&mut win, &mut and, t, 32);
+        let sas = and.sas.expect("两端应已算出 SAS");
+        assert_eq!(win.sas, Some(sas), "前提：两端 SAS 一致");
+        assert!(
+            and.session_key.is_some(),
+            "前提：握手已完成、会话密钥已建立"
+        );
+        let _ = drain_events(&mut and);
+
+        // 人为制造不一致（等价于中间人改过展示码）
+        and.sas = Some((sas + 1) % 1_000_000);
+        win.send_pair_confirm();
+        for p in win.take_outbound() {
+            and.feed(&p, t);
+        }
+        let evs = drain_events(&mut and);
+        assert!(
+            evs.iter().any(|e| matches!(e, EngineEvent::Error { .. })),
+            "SAS 不一致必须出声"
+        );
+        assert!(!and.is_paired(), "不一致的一侧不得进入 Paired");
+        assert!(
+            and.session_key.is_none(),
+            "SAS 判不一致后必须清掉会话密钥，否则终态还能解密业务帧"
+        );
+    }
+
+    /// 配对最后一步的校验基准不能塌成空串：本机身份取不到指纹时，"对端声明了一个空指纹"
+    /// 会让等号成立，于是这道人工闸门被自动放行。
+    #[test]
+    fn pair_done_is_rejected_when_own_fingerprint_is_unavailable() {
+        let (mut win, _and) = paired_pair();
+        let flow = win.pair.clone().expect("前提：配对流程还在");
+        win.peer_done_verified = false;
+
+        // 对照组：身份在位时空指纹只是"不一致"，走的是原来的那条报错
+        win.on_pair_done(1, &flow.pair_done_plaintext(""));
+        assert!(
+            !win.peer_done_verified,
+            "本机指纹非空时，空指纹载荷不得判为通过"
+        );
+        let _ = win.take_events();
+
+        win.identity = None;
+        win.on_pair_done(2, &flow.pair_done_plaintext(""));
+        assert!(
+            !win.peer_done_verified,
+            "本机身份不可用时，空指纹载荷不得判为通过"
+        );
+        let evs = win.take_events();
+        assert!(
+            evs.iter()
+                .any(|e| matches!(e, EngineEvent::Error { context, .. }
+                if context.contains("本机身份不可用"))),
+            "取不到基准指纹必须出声，实际事件：{evs:?}"
+        );
+    }
+
+    /// 广播名超上限时的两端口径：发端截断不得劈开多字节字符（劈开了对端 `from_utf8` 失败，
+    /// 整台设备的名字会变成空的），收端也要按同一个上限截（发端截断不代表收到的不会超长）。
+    #[test]
+    fn oversized_advert_name_is_capped_without_breaking_characters() {
+        // 发端：ASCII 超长截到上限；CJK 超长退到字符边界
+        assert_eq!(
+            truncate_name(&"A".repeat(100), HELLO_NAME_MAX),
+            vec![b'A'; HELLO_NAME_MAX]
+        );
+        let cjk = truncate_name(&"智".repeat(20), HELLO_NAME_MAX);
+        assert!(
+            cjk.len() < HELLO_NAME_MAX,
+            "32 落在一个 3 字节字符中间，应退到边界"
+        );
+        assert_eq!(String::from_utf8(cjk.clone()).unwrap().chars().count(), 10);
+
+        // 收端：40 字节的 ASCII 名字截到 32，且仍然是一条正常的 PeerHello
+        let t = now();
+        let (mut win, _) = pair_engines(None, None);
+        win.start(t);
+        let long = "B".repeat(40);
+        let body = tlv_codec::encode(&[
+            Tlv::buf(TAG_ADVERT_NAME, long.as_bytes()),
+            Tlv::u8(TAG_OS, linkx_protocol::OS_ANDROID),
+            Tlv::buf(TAG_VERSION, b"0.5.1"),
+        ])
+        .unwrap();
+        win.on_hello(&body);
+        let evs = drain_events(&mut win);
+        let got = evs
+            .iter()
+            .find_map(|e| match e {
+                EngineEvent::PeerHello { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .expect("HELLO 应上报 PeerHello");
+        assert_eq!(got.len(), HELLO_NAME_MAX, "收端应按同一上限截断");
+
+        // 收端遇到劈成半截的多字节字符：整段坏字节不采纳，宁可名字为空
+        let (mut win2, _) = pair_engines(None, None);
+        win2.start(t);
+        let broken = vec![TAG_ADVERT_NAME, 3, b'X', 0xE6, b'Y'];
+        win2.on_hello(&broken);
+        assert!(drain_events(&mut win2).iter().any(|e| matches!(
+            e,
+            EngineEvent::PeerHello { name, .. } if name.is_empty()
+        )));
     }
 }
