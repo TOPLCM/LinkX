@@ -86,29 +86,28 @@ jobs:
           curl -sSL -o /tmp/protoc.zip             https://github.com/protocolbuffers/protobuf/releases/download/v21.12/protoc-21.12-linux-x86_64.zip
           unzip -q /tmp/protoc.zip -d /tmp/protoc
           echo "PROTOC=/tmp/protoc/bin/protoc" >> $GITHUB_ENV
-      # 关键：先产出 liblinkx_core.so，否则 NativeCore.loadLibrary 在运行时崩溃
-      - name: 构建 Rust Core .so（arm64-v8a）
-        run: bash Scripts/build-android-core.sh
-      - name: Gradle 8.7 + AGP
+      - name: JDK 21 + Gradle 8.7
         uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: 21 }
       - uses: gradle/actions/setup-gradle@v3
         with: { gradle-version: 8.7 }
-      - run: |
-          echo "sdk.dir=$ANDROID_HOME" > Platforms/Android/local.properties || true
-          (cd Platforms/Android && gradle -p . assembleDebug --no-daemon)
+      # 出包走本地同一条脚本：Rust Core .so → Gradle → zipalign → apksigner → 零调试残留校验。
+      # 交付版校验只对 release 有意义：debug 包按定义带着调试控制面。
+      - name: 出交付 APK
+        env:
+          GRADLE_ONLINE: "1"
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > Platforms/Android/local.properties
+          bash Scripts/build-android-apk.sh --release
       - name: 校验 APK 已打包 liblinkx_core.so
         run: |
-          APK="$(find Platforms/Android -name '*.apk' | head -1)"
-          [ -n "$APK" ] || { echo "❌ 未找到 APK"; exit 1; }
+          APK="$(ls Release/Android/*-release.apk | head -1)"
           unzip -l "$APK" | grep -q 'lib/arm64-v8a/liblinkx_core.so' \
             || { echo "缺少 lib/arm64-v8a/liblinkx_core.so"; exit 1; }
           echo "✅ APK 内含 liblinkx_core.so: $APK"
       # 安卓交付物是唯一带 JNI 调试符号面的产物，这道检查必须在 CI 上跑。
       - name: 交付构建零调试残留（APK 内 .so）
-        run: |
-          APK="$(find Platforms/Android -name '*.apk' | head -1)"
-          bash Scripts/check-release-clean.sh --apk-so "$APK"
+        run: bash Scripts/check-release-clean.sh --apk-so "$(ls Release/Android/*-release.apk | head -1)"
       - name: compose/kotlin 版本配对
         run: bash Scripts/check-compose-kotlin-pair.sh
       - name: 版本同步
@@ -124,7 +123,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
-          targets: x86_64-pc-windows-gnu, aarch64-linux-android
+          # 这台 runner 只跑宿主（msvc）的构建，不需要交叉目标；clippy 不是 rustc 自带的组件。
+          components: clippy
       - name: protoc 21.12（prost-build 不内置 protoc，缺则 build.rs panic；版本与本机一致）
         run: |
           Invoke-WebRequest -OutFile protoc.zip `
