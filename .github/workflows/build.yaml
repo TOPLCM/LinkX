@@ -54,6 +54,11 @@ jobs:
           toolchain: "1.97.1"
           targets: x86_64-pc-windows-gnu
       - run: sudo apt-get update && sudo apt-get install -y mingw-w64
+      - name: protoc 21.12（协议 crate 的 build.rs 需要）
+        run: |
+          curl -sSL -o /tmp/protoc.zip             https://github.com/protocolbuffers/protobuf/releases/download/v21.12/protoc-21.12-linux-x86_64.zip
+          unzip -q /tmp/protoc.zip -d /tmp/protoc
+          echo "PROTOC=/tmp/protoc/bin/protoc" >> $GITHUB_ENV
       - name: 交叉编译 Windows 壳
         run: cargo build --release --target x86_64-pc-windows-gnu --manifest-path Platforms/Windows/Cargo.toml
       # 交付产物里不许有调试控制面。本 job 出的正是不带 agent-debug 的那个 exe。
@@ -76,6 +81,11 @@ jobs:
         with:
           ndk-version: r27c
           add-to-path: false
+      - name: protoc 21.12（协议 crate 的 build.rs 需要）
+        run: |
+          curl -sSL -o /tmp/protoc.zip             https://github.com/protocolbuffers/protobuf/releases/download/v21.12/protoc-21.12-linux-x86_64.zip
+          unzip -q /tmp/protoc.zip -d /tmp/protoc
+          echo "PROTOC=/tmp/protoc/bin/protoc" >> $GITHUB_ENV
       # 关键：先产出 liblinkx_core.so，否则 NativeCore.loadLibrary 在运行时崩溃
       - name: 构建 Rust Core .so（arm64-v8a）
         run: bash Scripts/build-android-core.sh
@@ -158,8 +168,8 @@ jobs:
     needs: core
     steps:
       - uses: actions/checkout@v4
-      - name: cargo-audit 0.21.8
-        run: cargo install cargo-audit --version 0.21.8 --locked
+      - name: cargo-audit
+        run: cargo install cargo-audit
       - name: 主 workspace 依赖漏洞
         run: cargo audit --file Cargo.lock --ignore RUSTSEC-2023-0071
       # fuzz 有自己的依赖锁（Tests/fuzz），不进交付产物，但同样会拉到有漏洞的版本，一并扫。
