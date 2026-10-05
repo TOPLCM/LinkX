@@ -31,7 +31,7 @@ Release/                          （除 Archive 里的 .sha256 之外，下面�
 
 | 平台 | 文件 | 大小 (bytes) | SHA-256 |
 |---|---|---|---|
-| Windows | `LinkX-0.5.1-x64.msi` | 630,784 | `62380562aa99c3ec764bb820beaa5a433da97e5d733736bddd3ba45a4c1e02cb` |
+| Windows | `LinkX-0.5.1-x64.msi` | 630,784 | `3ba9f6ef31519855d5336f84ae9788b997d179e08580f1130474fe11c2d5a89a` |
 | Android | `LinkX-0.5.1-release.apk` | 2,407,710 | `92d3b6bcdee182ae205f8d9825e333c0eb3e92a49f164453ea94b1c78b6e2be8` |
 
 这一版手机端没有功能改动（只是版本号与前向兼容的 `versionCode` 一起前进），

@@ -76,8 +76,7 @@ fn main() {
         .iter()
         .map(std::path::PathBuf::from)
         .find(|p| p.is_file());
-    // 开机自启动拉起的那一次只进托盘、不弹主窗口。参数名与写进注册表的那一份同源于 `autostart`，
-    // 不在两处各抄一遍字符串
+    // 开机自启动拉起的那一次只进托盘、不弹主窗口；参数名与写进注册表的那一份同源于 `autostart`
     let start_hidden = autostart::has_minimized_arg(
         &args
             .iter()
@@ -96,9 +95,8 @@ fn main() {
                     say("[LinkX] 运行中的实例未响应管道，路径未转交");
                 }
             }
-            // 没有文件参数 = 用户又双击了一次图标。运行中的实例可能藏在托盘里（开机自启动拉起的那一次、
-            // 或上次选了「最小化到托盘」），不出声地退出会让用户以为双击没反应，所以请它把窗口摆回来。
-            // 带 `--minimized` 的这一次本身就要求不显示，不去打扰
+            // 没有文件参数 = 用户又双击了一次图标。运行中的实例可能藏在托盘里，不出声地退出
+            // 会让用户以为双击没反应，所以请它把窗口摆回来；带 `--minimized` 的那次要求不显示
             None => {
                 if start_hidden || ipc::request_show() {
                     say("[LinkX] 已有实例在运行，本进程退出");
@@ -207,6 +205,5 @@ fn main() {
 
 #[cfg(not(windows))]
 fn main() {
-    // 该壳仅面向 Windows 目标（交叉编译构建）
     eprintln!("linkx-windows 仅支持 Windows 目标，请用 --target x86_64-pc-windows-gnu 构建");
 }
