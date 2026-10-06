@@ -164,8 +164,9 @@ fn hex_prefix(digest: &[u8]) -> String {
 /// `chunk_size` 与 `size` 都是**对端在 FILE_META 里声明的**：0 会让 `div_ceil` 除零 panic
 /// （全 profile `panic = "abort"` ⇒ 一条帧打死宿主进程），块数超出 u32 若直接 `as u32` 会
 /// **回绕成 0**，于是"收满 total 块"被 0 块满足、空文件被判成完整原件。两者都不许静默发生：
-/// 收侧在 `on_meta` 就把这两种声明拒掉（见 `RecvTask::on_meta` 的分块校验），这里只兜住
-/// "回绕"这一半 —— 饱和成 `u32::MAX` 至多是传不完，回绕成 0 却是假成功。
+/// 收侧在采纳 FILE_META 时就拒这两种声明（电脑端 `app::begin_recv`、手机端
+/// `LinkxRuntime.beginReceive`），这里只兜住"回绕"这一半 ——
+/// 饱和成 `u32::MAX` 至多是传不完，回绕成 0 却是假成功。
 pub fn chunks_total(size: u64, chunk_size: usize) -> u32 {
     if size == 0 || chunk_size == 0 {
         return 0;
