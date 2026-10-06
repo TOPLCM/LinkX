@@ -56,6 +56,11 @@ pub const BLE_MTU_MAX: usize = linkx_protocol::ble_frag::MAX_ATT_MTU;
 pub const DISCOVER_REATTACH: Duration = Duration::from_secs(5);
 /// HELLO 内 advert_name 截断上限（保 TLV ≤64B）
 pub const HELLO_NAME_MAX: usize = 32;
+/// HELLO 里版本串的字节上限。四条 TLV 的 tag/len 占 8B，名字 32B、系统 1B、序号 8B，
+/// 加起来正好压满 [`linkx_protocol::TLV_MAX_MSG`]（64B）⇒ 版本最多 15B。
+/// 在这里就截断，是为了让 HELLO 的编码**不可能失败**：以前失败时退化成只发系统字节，
+/// 对端当场拿不到设备名，"按名字认领已绑定设备"那条路就死了。
+pub const HELLO_VERSION_MAX: usize = 15;
 
 /// 本引擎实例的 HELLO 序号。64 位随机足够：它只需要把"同一次启动的重投"与"新一次启动"分开。
 fn random_hello_seq() -> u64 {
@@ -70,6 +75,20 @@ fn truncate_name(s: &str, max_bytes: usize) -> Vec<u8> {
         end -= 1;
     }
     s.as_bytes()[..end].to_vec()
+}
+
+/// 组一条 HELLO 的正文：名字 / 系统 / 版本 / 序号四条，两条字符串都按预算截断。
+///
+/// 拆成纯函数是要能被单测钉住的：名字进不了 HELLO，电脑端就认不出那台已绑定的设备
+/// （它按名字认领并自动重连），而这条链路在 BLE 广播少带名字时已经断过一次。
+fn encode_hello_body(name: &str, os: u8, version: &str, seq: u64) -> Vec<u8> {
+    tlv_codec::encode(&[
+        Tlv::buf(TAG_ADVERT_NAME, &truncate_name(name, HELLO_NAME_MAX)),
+        Tlv::u8(TAG_OS, os),
+        Tlv::buf(TAG_VERSION, &truncate_name(version, HELLO_VERSION_MAX)),
+        Tlv::buf(TAG_HELLO_SEQ, &seq.to_be_bytes()),
+    ])
+    .expect("HELLO 的四条 TLV 恒在 64B 预算内（见 HELLO_VERSION_MAX）")
 }
 /// 握手完成后等待对端 IDENTITY 的时限（BLE 分片下 ~550B 载荷 + RSA 生成余量）
 pub const IDENTITY_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -320,8 +339,6 @@ pub enum EngineEvent {
         /// 手机当前媒体音量 0-100（电脑侧 +/- 以此为基准，不自己记账）
         volume: i32,
     },
-    /// 对端（手机）当前曲目的封面。**只可能经局域网到达**（纯蓝牙时手机端就不发），
-    /// `track_key` 原样带回，收端据此确认"这张图属于现在这首歌"，不靠到达顺序猜。
     /// 对端（电脑）下发的播放控制指令，由平台层执行。
     MediaCommand {
         /// `media_command::Action` 的值（0=PLAY_PAUSE … 8=SET_VOLUME）
@@ -1295,16 +1312,12 @@ impl SessionEngine {
         // 每发一条前进一次：本端"重新贴上来"的那次 HELLO 必须与上一条不同号，
         // 而对端把同一条重投回来时字节不变，正好用来判重。
         self.hello_seq = self.hello_seq.wrapping_add(1);
-        let name = truncate_name(&self.cfg.local_name, HELLO_NAME_MAX);
-        let body = tlv_codec::encode(&[
-            Tlv::buf(TAG_ADVERT_NAME, &name),
-            Tlv::u8(TAG_OS, self.cfg.os),
-            Tlv::buf(TAG_VERSION, self.cfg.version.as_bytes()),
-            Tlv::buf(TAG_HELLO_SEQ, &self.hello_seq.to_be_bytes()),
-        ])
-        .unwrap_or_else(|_| {
-            tlv_codec::encode(&[Tlv::u8(TAG_OS, self.cfg.os)]).expect("单 TLV 必然可编码")
-        });
+        let body = encode_hello_body(
+            &self.cfg.local_name,
+            self.cfg.os,
+            &self.cfg.version,
+            self.hello_seq,
+        );
         self.send_plain(msg_type::HELLO, &body);
     }
 
@@ -1893,11 +1906,15 @@ impl SessionEngine {
                 self.emit(EngineEvent::PeerPaired {
                     fingerprint: fp.clone(),
                 });
-                self.send_pair_done();
+                if !self.send_pair_done() {
+                    self.report_pair_done_lost();
+                }
             }
             TofuVerdict::NewPeer => {
                 // 全新设备：互换 PAIR_CONFIRM(SAS) → 人工比对
-                self.send_pair_confirm();
+                if !self.send_pair_confirm() {
+                    self.note_pairing_frame_lost("PAIR_CONFIRM");
+                }
             }
             TofuVerdict::Mismatch => {
                 let old = renamed.map(|t| t.fingerprint).unwrap_or_default();
@@ -1931,21 +1948,45 @@ impl SessionEngine {
         });
     }
 
-    fn send_pair_confirm(&mut self) {
+    /// 配对过程中的某条帧没能出去。**发给谁、为什么**由 `send_encrypted` 自己报，这里只留一条
+    /// 定位到"是哪一步断了"的埋点：两端各自停在哪儿，事后只看这条就够
+    fn note_pairing_frame_lost(&mut self, frame: &str) {
+        debuglog::log!(
+            Level::Warn,
+            "session",
+            "pair.frame_lost",
+            &[("frame", frame)]
+        );
+    }
+
+    /// 本机已认定配对完成、PAIR_DONE 却没送出去：信任照写（身份已经人工核对过，回滚等于
+    /// 让用户重走一遍 SAS），但"对端还停在配对那一步"必须让界面说得出，否则就是
+    /// 一边显示已配对、一边一直在转圈
+    fn report_pair_done_lost(&mut self) {
+        self.note_pairing_frame_lost("PAIR_DONE");
+        self.emit_error(
+            err_code::IO_GENERIC,
+            "配对确认没送到对端：本机已记下这台设备，对端会停在配对那一步，请让两端重新连接一次",
+        );
+    }
+
+    /// 发 PAIR_CONFIRM。返回值 = 这条到底出去了没有（`send_encrypted` 失败时自己会报原因）
+    fn send_pair_confirm(&mut self) -> bool {
         let Some(flow) = self.pair.clone() else {
-            return;
+            return false;
         };
         // 统一走 send_encrypted（方向标签 + 帧头 AAD 一次性处理）
         let body = flow.confirm_plaintext();
-        let _ = self.send_encrypted(MSG_PAIR_CONFIRM, &body);
+        self.send_encrypted(MSG_PAIR_CONFIRM, &body)
     }
 
-    fn send_pair_done(&mut self) {
+    /// 发 PAIR_DONE。`false` = 没出去：本机已经算配对完成，对端却还停在等人核对 SAS 的那一步
+    fn send_pair_done(&mut self) -> bool {
         let (Some(flow), Some(peer_fp)) = (self.pair.clone(), self.peer_fp.clone()) else {
-            return;
+            return false;
         };
         let body = flow.pair_done_plaintext(&peer_fp);
-        let _ = self.send_encrypted(MSG_PAIR_DONE, &body);
+        self.send_encrypted(MSG_PAIR_DONE, &body)
     }
 
     /// 用户确认 SAS 一致（首次配对的最后人工闸门）→ PAIRED + PAIR_DONE + 写入信任库
@@ -1955,7 +1996,9 @@ impl SessionEngine {
             return;
         }
         self.transition(SessionEvent::SasConfirmed);
-        self.send_pair_done();
+        if !self.send_pair_done() {
+            self.report_pair_done_lost();
+        }
         if let Some(fp) = self.peer_fp.clone() {
             // 仅在此刻（人工确认 SAS 一致）把对端身份写入信任库；跨重启由平台侧持久化
             // （Windows trust.json / Android SharedPreferences）。
@@ -1994,7 +2037,9 @@ impl SessionEngine {
             return;
         }
         self.transition(SessionEvent::FingerprintReAccepted); // → Pairing
-        self.send_pair_confirm();
+        if !self.send_pair_confirm() {
+            self.note_pairing_frame_lost("PAIR_CONFIRM");
+        }
         // 防死锁：Repaired 期间对端（NewPeer 视角）已发过 PAIR_CONFIRM 而当时无法处理；
         // 此处若它已在手，直接推进到 SAS 比对，避免双端互相等待。
         if self.peer_confirm_seen && self.mgr.state == SessionState::Pairing {
@@ -2251,8 +2296,12 @@ impl SessionEngine {
                 // 幂等：对端仍是「首次配对」视角（例如它清过数据/换了身份）→
                 // 回 PAIR_CONFIRM（让对端能看到 SAS 做人工比对）+ PAIR_DONE（帮其完成），
                 // 同时把 SAS 上报本端 UI，保证「人工比对」这一步在两侧都真实发生。
-                self.send_pair_confirm();
-                self.send_pair_done();
+                if !self.send_pair_confirm() {
+                    self.note_pairing_frame_lost("PAIR_CONFIRM");
+                }
+                if !self.send_pair_done() {
+                    self.report_pair_done_lost();
+                }
                 if let Some(sas) = self.sas {
                     self.emit(EngineEvent::SasReady { sas });
                 }
@@ -2269,6 +2318,13 @@ impl SessionEngine {
 
     fn on_pair_done(&mut self, _seq: u32, plaintext: &[u8]) {
         if self.pair.is_none() || self.session_key.is_none() {
+            // 状态不对就丢掉：留一条埋点，否则"对端说配完了、我这没反应"无从对照
+            debuglog::log!(
+                Level::Warn,
+                "session",
+                "pair.done_dropped",
+                &[("paired", if self.pair.is_some() { "1" } else { "0" })]
+            );
             return;
         }
         // 解密成功已证明对端掌握会话密钥；载荷是**对端视角的本端指纹**，故须与本端自身
@@ -3400,6 +3456,39 @@ mod tests {
         assert_eq!(win.trusted_peers().len(), 1);
         assert_eq!(win.trusted_peers()[0].fingerprint, fp_of_side(1));
         assert_eq!(and.trusted_peers()[0].fingerprint, fp_of_side(0));
+    }
+
+    /// HELLO 的四条 TLV 在**最坏情况**（名字与版本都长到超出预算）也必须装进 64B，
+    /// 而且名字与序号都在。以前编不下就退化成只发系统字节：对端拿不到名字，
+    /// "按名字认领已绑定设备并自动重连"当场失效，而这条链路已经断过一次。
+    #[test]
+    fn hello_body_keeps_name_and_seq_even_for_the_longest_inputs() {
+        let name = "小".repeat(40); // 120 字节，远超 32B 预算
+        let version = "9".repeat(60);
+        let body = encode_hello_body(&name, linkx_protocol::OS_ANDROID, &version, 0x0102);
+        assert!(
+            body.len() <= tlv_codec::TLV_MAX_MSG,
+            "HELLO 正文 {}B 超出 {}B 预算",
+            body.len(),
+            tlv_codec::TLV_MAX_MSG
+        );
+        let got_name = tlv_codec::get(&body, TAG_ADVERT_NAME)
+            .unwrap()
+            .unwrap_or_default();
+        let back = String::from_utf8(got_name.to_vec()).expect("截断不能切断一个字符");
+        assert!(!back.is_empty(), "名字整条丢了：自动重连会认不出设备");
+        assert!(name.starts_with(&back), "截出来的必须是名字的开头一段");
+        let seq = tlv_codec::get(&body, TAG_HELLO_SEQ)
+            .unwrap()
+            .unwrap_or_default();
+        assert_eq!(seq.len(), 8, "序号丢了就退化成「每条 HELLO 都是新会话」");
+        assert_eq!(u64::from_be_bytes(seq.try_into().unwrap()), 0x0102);
+        assert!(
+            tlv_codec::get(&body, TAG_VERSION)
+                .unwrap()
+                .is_some_and(|v| v.len() <= HELLO_VERSION_MAX),
+            "版本串必须按预算截"
+        );
     }
 
     #[test]
