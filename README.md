@@ -27,7 +27,7 @@
 
 ## 下载
 
-[Releases](releases) 页面取安装包，校验值见 [`Release/README.md`](Release/README.md)。
+安装包挂在 [GitHub Releases](https://github.com/TOPLCM/LinkX/releases)；每个包的 SHA-256 记在 [`Release/README.md`](Release/README.md)，下载后比一下才算拿到同一个文件。
 
 | 平台 | 要求 | 体积 |
 |---|---|---|
@@ -44,7 +44,7 @@ MSI 未代码签名，首次运行有 SmartScreen 提示（更多信息 → 仍�
 - **Windows**：纯 Win32 + GDI 自绘，无框架无 WebView，空闲内存约 27 MB
 - **Android**：Kotlin + Jetpack Compose，经 JNI 调核心
 - **加密**：Noise XX 握手 + ChaCha20-Poly1305，蓝牙与 TCP 全链路同强度
-- **通道分工**：通知/剪贴板/媒体走蓝牙，文件走局域网加密通道
+- **通道分工**：配对、通知转发、剪贴板走蓝牙；媒体状态与控制、通知回复、电量在局域网连通时走局域网、否则回退蓝牙；文件与相册原图只走局域网加密通道
 
 ## 安全
 
@@ -64,7 +64,7 @@ MSI 未代码签名，首次运行有 SmartScreen 提示（更多信息 → 仍�
 | v0.3.0 | 安全底座：设备身份、加密握手 |
 | v0.4.0 | 功能完善：媒体控制、相册 |
 | v0.5.0 | 大修与打磨：通知回复、BUG 修复 |
-| v0.5.1 | 电脑端常驻：开机自启动、关闭时可选最小化到托盘 |
+| v0.5.1 | 电脑端常驻与安全底座：开机自启动、托盘常驻、系统通知卡、中文安装向导、会话密钥改用握手秘密派生 |
 
 ## 构建
 

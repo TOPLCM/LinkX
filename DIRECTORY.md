@@ -74,8 +74,12 @@ TCP 连接与读写线程、加密字节流的分帧、抗重放与背压窗口�
 `src/ble_central.rs`（电脑端是蓝牙主机）、`src/network.rs`、`src/transfer.rs`，
 落盘与开关在 `src/identity.rs`、`src/settings.rs`、`src/features.rs`。
 `src/icons_svg.rs` 是生成物，改图标请改 `svg/` 再跑生成脚本。
-安装器走 `installers/LinkX-v4.wxs`（含防火墙规则、许可页、文件关联）；
-同目录的 `LinkX.wxs` 是早期链路，不带许可文件，不要用它做公开分发。
+系统消息走 `src/toast.rs`：弹 Windows 自己的通知卡（卡上两颗按钮靠 `linkx://` 回到主进程，
+口令一次性），弹不出去才回落 `src/tray.rs` 的托盘气泡；`src/ipc.rs` 是"第二次启动只转交、
+不再开一个窗口"的那条命名管道，也是按钮激活参数的入口。
+两份安装器源各喂一种打包引擎，内容要一起改：`installers/LinkX-v4.wxs` 给 Windows 上的 WiX v5
+（正式交付包由它出，含中文向导、防火墙规则、许可页、`linkx://` 注册），
+`installers/LinkX.wxs` 给 Linux 上的 wixl（交叉出包链路，向导是英文）。
 
 手机端是 Kotlin + Jetpack Compose，经 JNI 调同一份核心。`MainActivity.kt` 是各屏与底部导航，
 `LinkxRuntime.kt` 与 `NativeCore.kt` 是和 Native 核心的接缝，`BlePeripheralService.kt` 是蓝牙
