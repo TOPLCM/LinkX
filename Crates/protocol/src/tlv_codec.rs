@@ -64,6 +64,9 @@ pub fn encode(items: &[Tlv]) -> Result<Vec<u8>, TlvError> {
     Ok(out)
 }
 
+/// 一条消息里最多的条目数：解析端的内存与循环上界全靠它（这是**对端可控**的输入）
+pub const TLV_MAX_ENTRIES: usize = 32;
+
 /// 解析 TLV 序列（任意输入不 panic；截断、条目数超限视为错误）
 ///
 /// 解析端**不**卡 64B 总长：那条是编码侧的自我约束，对端把版本串写长一点就可能超，
@@ -88,7 +91,7 @@ pub fn parse(buf: &[u8]) -> Result<Vec<Tlv>, TlvError> {
                 if value_end > buf.len() {
                     return Err(TlvError::Truncated { offset: off, len });
                 }
-                if out.len() >= 32 {
+                if out.len() >= TLV_MAX_ENTRIES {
                     return Err(TlvError::TooManyEntries(out.len()));
                 }
                 out.push(Tlv {
