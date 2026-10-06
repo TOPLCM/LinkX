@@ -22,9 +22,9 @@ import java.util.concurrent.atomic.AtomicInteger
  * 界面必须把这句说明白，别让用户以为蓝牙坏了（[lastSkip] 就是干这个的）。
  *
  * 线程：采样与指令执行都在本模块自己的单线程 executor，绝不进 [LinkxRuntime] 的
- * `@Synchronized` 路径——`getActiveSessions` 与 `Settings.Secure` 是跨进程 Binder 调用，
- * 个别机型几十毫秒起步；锁内执行会按住全局锁，BLE 分片、TCP 帧、所有 JNI 一起停摆。
- * 同一个串行线程也顺带解决了采样与指令共写 [lastSkip] 的竞态。
+ * `@Synchronized` 路径——`getActiveSessions` 是跨进程 Binder 调用，个别机型几十毫秒起步，
+ * 锁内执行会按住全局锁，BLE 分片、TCP 帧、所有 JNI 一起停摆。池内串行，故结果字段用
+ * @Volatile 就够；只有节流基准 [lastAt] 由 tick 调用线程与池两头写。
  */
 object MediaControl {
 
@@ -50,7 +50,6 @@ object MediaControl {
      */
     private val SETTLE_DELAYS_MS = longArrayOf(150, 400, 900)
 
-
     private val busy = AtomicBoolean(false)
     private val pendingCmds = AtomicInteger(0)
     private val pool by lazy {
@@ -59,6 +58,8 @@ object MediaControl {
         }
     }
 
+    /** 上一次采样的时刻。tick 线程与池线程都会写，所以是 @Volatile。 */
+    @Volatile
     private var lastAt = 0L
     private var lastPushAt = 0L
     private var lastSignature = ""
@@ -146,6 +147,8 @@ object MediaControl {
     private fun settleAfter(app: Context, before: String, attempt: Int) {
         if (attempt >= SETTLE_DELAYS_MS.size) return
         pool.schedule({
+            // 这条链自己续命，所以每一跳都重新问一次开关：中途关掉就不该继续往外推业务消息
+            if (!Features.enabled(Module.MediaControl)) return@schedule
             val now = SystemClock.elapsedRealtime()
             val after = runCatching { sampleAndPush(app, now) }.getOrDefault(before)
             // 追采也算一次采样，别让常规 tick 紧接着再采一遍
@@ -154,7 +157,7 @@ object MediaControl {
         }, SETTLE_DELAYS_MS[attempt], TimeUnit.MILLISECONDS)
     }
 
-    /** 一次采样的材料：签名（判"变没变"）+ 要推出去的字段 + 原始元数据（封面从这里取）。 */
+    /** 一次采样的材料：签名（判"变没变"）+ 要推出去的字段 + 播放速度。 */
     private data class Snap(val sig: String, val p: Playback, val speedX100: Int)
 
     /** 读一遍本机媒体会话并算出签名。**不推送、不动任何"上次"记账**，所以指令前后各调一次是安全的。 */
