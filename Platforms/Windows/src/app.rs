@@ -1274,6 +1274,22 @@ impl Worker {
             self.reconnect_ble(addr);
         }
 
+        // 引擎不在（还没配对完 / 正在重连）时下面整块都不执行，而这些请求已经被 take 走了：
+        // 不出声就等于用户看到的"点了没反应"。兜底保证每次操作都有回应。
+        if self.engine.is_none()
+            && (req.media_cmd.is_some()
+                || req.send_clip.is_some()
+                || req.send_file
+                || req.cancel_file.is_some()
+                || req.notify_reply.is_some()
+                || req.album_list.is_some()
+                || req.album_full.is_some()
+                || !req.album_drag.is_empty()
+                || req.album_thumb_one.is_some())
+        {
+            self.push_error("操作没有执行：本机现在没有已配对的连接".to_string());
+        }
+
         if let Some(eng) = self.engine.as_mut() {
             if req.confirm_sas {
                 eng.confirm_sas();
