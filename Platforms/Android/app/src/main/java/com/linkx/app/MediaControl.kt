@@ -238,6 +238,14 @@ object MediaControl {
     }
 
 
+    /** 目标应用没实现某个动作时，安卓是**静默忽略**的：先查 `PlaybackState.actions` 能力位，
+     *  做不到就直说，不能报"已下发"而手机什么都没做。 */
+    private fun supports(state: PlaybackState?, action: Long): Boolean =
+        state != null && state.actions and action != 0L
+
+    private fun unsupported(what: String): String =
+        "手机上的播放器不支持$what（当前媒体会话没有这个能力）"
+
     /** 执行指令，返回给控制面/日志的说明。动作码与 `Proto/linkx/v1/media.proto` 的 `MediaCommand.Action` 一一对应。 */
     private fun handleCommand(ctx: Context, action: Int, volume: Int, deltaMs: Long): String {
         val picked = pickController(ctx) ?: return "手机当前没有可控制的媒体会话（$lastSkip）"
@@ -249,20 +257,40 @@ object MediaControl {
             // 用精确的 play/pause 而非盲发 toggle：对端已在目标态时 toggle 会把它反过来。
             ACTION_PLAY_PAUSE ->
                 if (state?.state == PlaybackState.STATE_PLAYING) {
+                    if (!supports(state, PlaybackState.ACTION_PAUSE)) return unsupported("暂停")
                     tc.pause(); "已下发：暂停"
                 } else {
+                    if (!supports(state, PlaybackState.ACTION_PLAY)) return unsupported("播放")
                     tc.play(); "已下发：播放"
                 }
-            ACTION_PLAY -> { tc.play(); "已下发：播放" }
-            ACTION_PAUSE -> { tc.pause(); "已下发：暂停" }
-            ACTION_NEXT -> { tc.skipToNext(); "已下发：下一首" }
-            ACTION_PREV -> { tc.skipToPrevious(); "已下发：上一首" }
-            ACTION_STOP -> { tc.stop(); "已下发：停止" }
+            ACTION_PLAY -> {
+                if (!supports(state, PlaybackState.ACTION_PLAY)) return unsupported("播放")
+                tc.play(); "已下发：播放"
+            }
+            ACTION_PAUSE -> {
+                if (!supports(state, PlaybackState.ACTION_PAUSE)) return unsupported("暂停")
+                tc.pause(); "已下发：暂停"
+            }
+            // 安卓对"没实现的动作"是静默忽略：不查能力位就会报"已下发"而手机什么都没做
+            ACTION_NEXT -> {
+                if (!supports(state, PlaybackState.ACTION_SKIP_TO_NEXT)) return unsupported("下一首")
+                tc.skipToNext(); "已下发：下一首"
+            }
+            ACTION_PREV -> {
+                if (!supports(state, PlaybackState.ACTION_SKIP_TO_PREVIOUS)) return unsupported("上一首")
+                tc.skipToPrevious(); "已下发：上一首"
+            }
+            ACTION_STOP -> {
+                if (!supports(state, PlaybackState.ACTION_STOP)) return unsupported("停止")
+                tc.stop(); "已下发：停止"
+            }
             ACTION_SEEK_FWD -> {
+                if (!supports(state, PlaybackState.ACTION_SEEK_TO)) return unsupported("快进")
                 tc.seekTo((pos + seekDelta(deltaMs)).coerceAtLeast(0L))
                 "已下发：快进"
             }
             ACTION_SEEK_BACK -> {
+                if (!supports(state, PlaybackState.ACTION_SEEK_TO)) return unsupported("快退")
                 tc.seekTo((pos - seekDelta(deltaMs)).coerceAtLeast(0L))
                 "已下发：快退"
             }

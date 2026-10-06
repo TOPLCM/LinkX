@@ -654,6 +654,10 @@ pub(crate) struct UiState {
     /// 当前曲目的封面（手机只在局域网通时推来）。按 `track_key` 归属，见 [`UiState::cover_of`]。
     pub media_cover: Option<MediaCoverView>,
     pub media_cmd_req: Option<(i32, i32, i64)>,
+    /// 卡片按钮按下去时用户要的**目标态**（true=播放）+ 按下时刻。系统媒体卡先按它显示，
+    /// 最多 `smtc::OPTIMISTIC_WINDOW` 后回落到手机真正报回来的状态：没有这条，按下暂停会被
+    /// 下一次状态刷新瞬间刷回播放（真机反馈）。
+    pub media_cmd_want: Option<(bool, std::time::Instant)>,
 
     pub battery: Option<BatteryView>,
 
@@ -770,6 +774,7 @@ impl Default for UiState {
             media: None,
             media_cover: None,
             media_cmd_req: None,
+            media_cmd_want: None,
             battery: None,
             album: AlbumView {
                 per_page: ALBUM_PER_PAGE,
