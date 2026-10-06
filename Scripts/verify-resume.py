@@ -27,6 +27,7 @@
 """
 import argparse
 import json
+import glob
 import math
 import os
 import pathlib
@@ -69,8 +70,11 @@ def phone_rows_text():
     return str((get(PHONE).get("host") or {}).get("file_rows") or "")
 
 
-def ndjson_path():
-    return os.path.join(os.environ["APPDATA"], "LinkX", "Logs", "linkx-debug.ndjson")
+def ndjson_paths():
+    """埋点会滚成 `linkx-debug.ndjson`、`linkx-debug.1.ndjson`……只认当前那份，
+    刚轮转过就等于什么都没读到，"这条分支真走过了"会被判成没走过。"""
+    d = os.path.join(os.environ["APPDATA"], "LinkX", "Logs")
+    return sorted(glob.glob(os.path.join(d, "linkx-debug*.ndjson")))
 
 
 def events(names, since_ms):
@@ -79,17 +83,22 @@ def events(names, since_ms):
     判"这条分支真的走过"只认它——界面状态几百毫秒就翻篇，靠轮询采样一定会漏。
     """
     out = {n: [] for n in names}
-    with open(ndjson_path(), encoding="utf-8", errors="replace") as f:
-        for line in f:
-            if not line.startswith("{"):
-                continue
-            try:
-                e = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            n = e.get("event")
-            if n in out and e.get("ts_ms", 0) >= since_ms:
-                out[n].append((e["ts_ms"], e.get("fields") or {}))
+    for path in ndjson_paths():
+        try:
+            f = open(path, encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with f:
+            for line in f:
+                if not line.startswith("{"):
+                    continue
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                n = e.get("event")
+                if n in out and e.get("ts_ms", 0) >= since_ms:
+                    out[n].append((e["ts_ms"], e.get("fields") or {}))
     return out
 
 
