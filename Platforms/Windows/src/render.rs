@@ -115,12 +115,14 @@ const DEVICE_ROW_W: i32 = 600;
 /// 版本条占掉的高度（画在 `h - 30`）：可见行数由客户区高度算（`notify_visible_rows`）——原来写死 9 行，第 9 行被它裁掉
 #[cfg(windows)]
 const NOTIFY_FOOT_H: i32 = 30;
-/// 通知行右侧两个文字按钮的槽位高与宽（「复制验证码」= 5 字 + 空格 + 最多 8 位数字，
-/// 长度上限由 `code_extract` 的 4..=8 位规则定死；「回复」短一档）
+/// 通知行右侧三个文字按钮的槽位高与宽。按钮上**不印验证码数字**：把 8 位码写进按钮会把正文
+/// 挤掉半行，而按钮要说清楚的只有"这颗是复制什么的"
 #[cfg(windows)]
 const NOTIFY_CHIP_H: i32 = 26;
 #[cfg(windows)]
-const NOTIFY_CODE_W: i32 = 132;
+const NOTIFY_CODE_W: i32 = 84;
+#[cfg(windows)]
+const NOTIFY_ALL_W: i32 = 70;
 #[cfg(windows)]
 const NOTIFY_REPLY_W: i32 = 64;
 /// 通知行右侧控件之间的统一间隙（逻辑像素）：两个按钮之间、最右那个与行末时间带之间都是它
@@ -225,7 +227,7 @@ const FILE_ROW_Y0: i32 = 216;
 /// 行高要同时容下"图标 + 进度条"两层；8 行 × 46 是 606 高客户区不溢出的上限
 const FILE_ROW_H: i32 = 46;
 #[cfg(windows)]
-const FILE_MAX_ROWS: usize = 8;
+pub(crate) const FILE_MAX_ROWS: usize = 8;
 /// 设置页：设备管理区 / 信息区的纵位**全部由开关区推导**（字面量排布加一行就叠字）；整页按"最小客户区 `LAYOUT_MIN_H` + 页脚 30"倒推，越界由本文件末尾的 `const _` 断言编译期拦下。
 /// 开关区每加一行，这里的间隙与 `SET_ROW_H` 就要一起重算——编译器会拦住，但拦不住"挤成一团"。
 #[cfg(windows)]
@@ -340,7 +342,8 @@ pub(crate) enum HitTarget {
     SendLocalClip,
     ToggleClipSync,
     CopyNotification(usize),
-    /// 通知行上的「复制验证码」小按钮（只复制抽出来的数字码）
+    /// 通知行上的「复制验证码」小按钮（只复制抽出来的数字码）；与整行点击的
+    /// `CopyNotification`（复制整条正文）是两颗并排的按钮
     CopyNotificationCode(usize),
     /// 通知行上的「回复」小按钮：选中这条，顶部回复条出现
     ReplyNotification(usize),
@@ -498,52 +501,51 @@ fn device_row_rect(e: &Env, i: usize) -> RECT {
 }
 
 #[cfg(windows)]
-/// 通知行右侧的小按钮（「复制验证码」/「回复」）：两个按钮共用一条"从右往左排"的算法，且**绘制、命中、悬停三处都只调这里**——
-/// 分成两处各算一遍坐标就是"看着能点、点不到"的根因。返回 `(验证码, 回复)`；不存在的那个为 `None`，不占位。
+/// 通知行右侧的小按钮（「复制验证码」/「复制全文」/「回复」）：全部按钮共用一条"从右往左排"的
+/// 算法，且**绘制、命中、悬停三处都只调这里** —— 分成两处各算一遍坐标就是"看着能点、点不到"的根因。
+/// 返回 `(验证码, 回复, 复制全文)`；不该出现的那颗为 `None`，不占位。
+/// 有码时给两颗复制（只复制数字 / 复制整条），没码时只剩「复制全文」
 fn notification_chips(
     e: &Env,
     i: usize,
     has_code: bool,
     can_reply: bool,
-) -> (Option<RECT>, Option<RECT>) {
+) -> (Option<RECT>, Option<RECT>, RECT) {
     let y = NOTIFY_Y0 + i as i32 * NOTIFY_ITEM_H;
     let top = y + (NOTIFY_ITEM_H - NOTIFY_CHIP_H) / 2;
     let mut x = notify_chips_right(e);
-    let mut code = None;
-    if has_code {
-        let l = x - NOTIFY_CODE_W;
-        code = Some(lrect(e, l, top, x, top + NOTIFY_CHIP_H));
-        x = l - NOTIFY_CHIP_GAP;
-    }
     let reply = if can_reply {
-        Some(lrect(e, x - NOTIFY_REPLY_W, top, x, top + NOTIFY_CHIP_H))
+        x -= NOTIFY_REPLY_W;
+        Some(lrect(e, x, top, x + NOTIFY_REPLY_W, top + NOTIFY_CHIP_H))
     } else {
         None
     };
-    (code, reply)
+    if reply.is_some() {
+        x -= NOTIFY_CHIP_GAP;
+    }
+    let code = if has_code {
+        x -= NOTIFY_CODE_W;
+        Some(lrect(e, x, top, x + NOTIFY_CODE_W, top + NOTIFY_CHIP_H))
+    } else {
+        None
+    };
+    if code.is_some() {
+        x -= NOTIFY_CHIP_GAP;
+    }
+    let all = lrect(e, x - NOTIFY_ALL_W, top, x, top + NOTIFY_CHIP_H);
+    (code, reply, all)
 }
 
 #[cfg(windows)]
-/// 「悬停才出现的复制图标」的左上角 x（逻辑像素）。它和两个文字按钮一样必须让开行末的
-/// 时间带：图标曾经直接贴 `right - 42`，而 `09:08:03` 是右对齐到同一条 `right` 的，
-/// 结果悬停时图标压在时间数字上 —— 这正是用户两轮截图抓到的同一类毛病。
-fn notify_copy_icon_x(e: &Env) -> i32 {
-    notify_chips_right(e) - NAV_ICON
+/// 两行文字的右界：最左那颗按钮之前。按钮锚在行右界、窗口右界在它右边，"截到窗口边"会从按钮
+/// 底下穿过 —— 谁后画谁赢，所以正文必须先让位
+fn notify_text_right(e: &Env, leftmost_chip: i32, right: i32) -> i32 {
+    (leftmost_chip - e.px(8)).min(right)
 }
 
 #[cfg(windows)]
-/// 两行文字的右界：最左那个按钮之前（没有按钮才是行尾）。按钮锚在行右界、窗口右界在它右边，"截到窗口边"会从按钮底下穿过——谁后画谁赢。
-fn notify_text_right(e: &Env, code: &Option<RECT>, reply: &Option<RECT>, right: i32) -> i32 {
-    code.iter()
-        .chain(reply.iter())
-        .map(|c| c.left - e.px(8))
-        .min()
-        .unwrap_or(right)
-        .min(right)
-}
-
-#[cfg(windows)]
-/// 通知页顶部回复条（输入框 + 「发送」），只在选中某条可回复通知时出现；压在标题与首行的空档上，列表几何不动。
+/// 通知页顶部回复条：输入框 + 「发送」。只在选中某条可回复通知时出现；压在标题与首行的空档上，
+/// 列表几何不动。复制那颗按钮**不放在这里** —— 它是"这条通知"的动作，不是"正在写的这句回复"的动作
 fn notify_reply_rects(e: &Env) -> (RECT, RECT) {
     let right = notify_right(e);
     let btn_l = right - NOTIFY_SEND_BTN_W;
@@ -1352,8 +1354,8 @@ pub(crate) fn hit_test(st: &UiState, e: &Env, x: i32, y: i32) -> Option<HitTarge
             let rows = notify_visible_rows(e);
             for slot in 0..rows.min(st.notifications.len().saturating_sub(base)) {
                 let item = &st.notifications[base + slot];
-                // 小按钮优先：整行也是"复制"，不先判它们就会被整行的命中吞掉
-                let (code, reply) =
+                // 小按钮优先：整行也是"复制全文"，不先判它们就会被整行的命中吞掉
+                let (code, reply, all) =
                     notification_chips(e, slot, notify_code_of(item).is_some(), item.can_reply);
                 if let Some(r) = code {
                     if point_in(&r, x, y) {
@@ -1364,6 +1366,9 @@ pub(crate) fn hit_test(st: &UiState, e: &Env, x: i32, y: i32) -> Option<HitTarge
                     if point_in(&r, x, y) {
                         return Some(HitTarget::ReplyNotification(base + slot));
                     }
+                }
+                if point_in(&all, x, y) {
+                    return Some(HitTarget::CopyNotification(base + slot));
                 }
             }
             (0..rows)
@@ -2728,11 +2733,8 @@ fn paint_notifications(hdc: HDC, e: &Env, st: &UiState, w: i32) {
         let hovered = st.list_hover == Some((1, i));
         // 正在回复的那一行用选中底色标出来：按钮是裸文字，靠描边框子标选中态会在整页里
         // 多出唯一一个"框"，而行底色本来就是这套界面里"就是它"的说法（连接页同做法）。
-        let selected = st.reply_target.as_ref().is_some_and(|t| {
-            t.package == item.package
-                && t.notification_id == item.notification_id
-                && t.tag == item.tag
-        });
+        // 判据只走 `is_reply_target` 这一份：列表按 key 就地合并、行号一直在变，各处各算一遍迟早算出两个答案
+        let selected = st.is_reply_target(item);
         if selected {
             fill_round(hdc, &row, p.sel_bg, e.px(8));
         } else if hovered {
@@ -2740,11 +2742,12 @@ fn paint_notifications(hdc: HDC, e: &Env, st: &UiState, w: i32) {
         }
         let y = row.top;
         let text_x = row.left + e.px(12);
-        // 抽得出验证码时行尾换成写明数字的小按钮；应用挂了 RemoteInput 才给「回复」，没有就是真不支持。
-        // 按钮必须先算：两行文字的右界要从这里扣掉一块，否则字从按钮底下穿过去。
+        // 行尾三颗文字按钮：有码时「复制验证码」+「复制全文」，应用挂了 RemoteInput 才给「回复」，
+        // 没有就是真不支持。按钮必须先算：两行文字的右界要从这里扣掉一块，否则字从按钮底下穿过去。
         let code = notify_code_of(item);
-        let (code_rect, reply_rect) = notification_chips(e, slot, code.is_some(), item.can_reply);
-        let text_right = notify_text_right(e, &code_rect, &reply_rect, right);
+        let (code_rect, reply_rect, all_rect) =
+            notification_chips(e, slot, code.is_some(), item.can_reply);
+        let text_right = notify_text_right(e, all_rect.left, right);
         // 行 1：标题（强调）+ 右侧时间；标题按像素截断，避免长标题压住时间/复制图标
         let raw_title = if item.title.is_empty() {
             "(无标题)"
@@ -2776,25 +2779,26 @@ fn paint_notifications(hdc: HDC, e: &Env, st: &UiState, w: i32) {
             &fmt_ts(item.ts_ms),
             p.foot_text,
         );
-        if let (Some(chip), Some(digits)) = (code_rect.as_ref(), code.as_deref()) {
+        // 两颗复制并排：有码时「复制验证码」+「复制全文」，没码时只剩「复制全文」。
+        // 以前是"悬停才浮一个复制图标"，用户看不出这行能复制什么，只能靠标题下面那行小字提示
+        if let Some(chip) = code_rect.as_ref() {
             text_out_center(
                 hdc,
                 e,
                 Role::Small,
                 chip,
-                &format!("复制验证码 {digits}"),
+                "复制验证码",
                 if hovered { p.accent } else { p.accent_dim },
             );
-        } else if hovered && reply_rect.is_none() {
-            icons::draw(
-                hdc,
-                Icon::Copy,
-                e.px(notify_copy_icon_x(e)),
-                y + ((row.bottom - row.top - e.px(NAV_ICON)) / 2).max(0),
-                e.px(NAV_ICON),
-                p.accent_dim,
-            );
         }
+        text_out_center(
+            hdc,
+            e,
+            Role::Small,
+            &all_rect,
+            "复制全文",
+            if hovered { p.accent } else { p.accent_dim },
+        );
         if let Some(chip) = reply_rect {
             text_out_center(
                 hdc,
@@ -4939,34 +4943,57 @@ mod layout_tests {
         );
     }
 
-    /// 通知行右侧的「回复」「复制验证码」不能压在文字上：两行文字的右界要先让给按钮。
+    /// 回复条只有「输入框 + 发送」：复制是"这条通知"的动作，不该挤在"正在写的这句回复"旁边。
+    /// 绘制、命中、悬停三处都调同一个 `notify_reply_rects`，所以这里只需断言几何本身。
+    #[test]
+    fn reply_bar_is_input_and_send_only() {
+        for w in [LAYOUT_MIN_W, 1400i32] {
+            let e = crate::theme::test_env(w, 606, 1.0);
+            let (input, send) = notify_reply_rects(&e);
+            assert!(input.right <= send.left, "输入框伸进了「发送」");
+            assert!(
+                input.right - input.left >= e.px(200),
+                "最窄布局下输入框被按钮挤没了（{w} 宽）"
+            );
+            assert!(
+                send.right - send.left >= e.px(40),
+                "「发送」挤到点不动（{w} 宽）"
+            );
+        }
+    }
+
+    /// 通知行右侧那三颗按钮（复制验证码 / 复制全文 / 回复）不能压在文字上，也不能伸进行末留给
+    /// 时间的那条带子：两行文字的右界要先让给最左那颗。四种组合都要成立 —— 少一颗时剩下的会挪位
     #[test]
     fn notification_text_yields_to_its_buttons() {
         for w in [LAYOUT_MIN_W, 1400i32] {
             let e = crate::theme::test_env(w, 606, 1.0);
             let right = e.px(w - CONTENT_R_PAD);
-            let row = notification_row_rect(&e, 0);
-            let text_x = row.left + e.px(12);
-            assert_eq!(
-                notify_text_right(&e, &None, &None, right),
-                right,
-                "没有按钮时不该白留一条右边距"
-            );
-            let (code, reply) = notification_chips(&e, 0, true, true);
-            let tr = notify_text_right(&e, &code, &reply, right);
-            assert!(tr <= code.unwrap().left && tr <= reply.unwrap().left);
-            assert!(
-                code.unwrap().right + e.px(NOTIFY_TIME_W) <= right,
-                "按钮伸进了行末留给时间的那条带子（B 电脑截图里「复制验证码」压在时间上）"
-            );
-            assert!(
-                notify_copy_icon_x(&e) + NAV_ICON <= notify_right(&e) - NOTIFY_TIME_W,
-                "悬停复制图标压在时间数字上：它没让开行末那条时间带（{w} 宽）"
-            );
-            assert!(
-                tr - text_x >= e.px(60),
-                "{w} 宽把文字区挤到截不出字：{tr} vs {text_x}"
-            );
+            let text_x = notification_row_rect(&e, 0).left + e.px(12);
+            for (has_code, can_reply) in
+                [(true, true), (false, true), (true, false), (false, false)]
+            {
+                let (code, reply, all) = notification_chips(&e, 0, has_code, can_reply);
+                assert_eq!(code.is_some(), has_code, "复制验证码跟着有没有码走");
+                assert_eq!(reply.is_some(), can_reply, "回复跟着能不能回走");
+                let tr = notify_text_right(&e, all.left, right);
+                for chip in [&code, &reply].into_iter().flatten() {
+                    assert!(tr <= chip.left, "{w} 宽：文字右界压进按钮");
+                    assert!(
+                        chip.right + e.px(NOTIFY_TIME_W) <= right,
+                        "{w} 宽：按钮伸进了行末留给时间的那条带子"
+                    );
+                }
+                assert!(tr <= all.left, "{w} 宽：正文没让给「复制全文」");
+                assert!(
+                    all.right + e.px(NOTIFY_TIME_W) <= right,
+                    "{w} 宽：「复制全文」伸进时间带子"
+                );
+                assert!(
+                    tr - text_x >= e.px(60),
+                    "{w} 宽把文字区挤到截不出字：{tr} vs {text_x}"
+                );
+            }
         }
     }
 
@@ -5106,8 +5133,8 @@ mod layout_tests {
             let o = ((y * W + x) * 4) as usize;
             ((px[o + 2] as u32) << 16) | ((px[o + 1] as u32) << 8) | px[o] as u32
         };
-        let (code, reply) = notification_chips(&e, 0, true, true);
-        for chip in [code.unwrap(), reply.unwrap()] {
+        let (code, reply, all) = notification_chips(&e, 0, true, true);
+        for chip in [code.unwrap(), reply.unwrap(), all] {
             // 槽位最上一行横跨整个宽度：文字够不到这一行（垂直居中），药丸一定够得到
             let probe_y = chip.top + 1;
             for x in chip.left..chip.right {

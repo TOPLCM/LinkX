@@ -107,6 +107,17 @@
               <RemoveFolder Id="RemoveInstallFolder" On="uninstall"/>
             </Component>
 
+            <!-- Optional: HKCU protocol handler for the notification card buttons.
+                 Windows starts a second linkx.exe with "linkx://..." and that instance hands the
+                 URI to the running one; the argument only ever carries a single-use token. -->
+            <Component Id="ProtocolHandler" Guid="{C4281F77-8154-435C-97D1-6504D0469533}">
+              <RegistryValue Root="HKCU" Key="Software\Classes\linkx" Type="string"
+                             Value="URL:LinkX card action" KeyPath="yes"/>
+              <RegistryValue Root="HKCU" Key="Software\Classes\linkx" Name="URL Protocol" Type="string" Value=""/>
+              <RegistryValue Root="HKCU" Key="Software\Classes\linkx\shell\open\command" Type="string"
+                             Value="&quot;[INSTALLFOLDER]linkx.exe&quot; &quot;%1&quot;"/>
+            </Component>
+
             <!-- 可选组件：开机自启（HKCU\...\Run），卸载时由 MSI 自动移除该注册表值 -->
             <Component Id="AutoStartEntry" Guid="5F2A9C31-7D64-4E88-9B21-0C3E5A7D9F14">
               <RegistryValue Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Run"
@@ -152,6 +163,7 @@
     <!-- 功能/组件：主程序恒装；开始菜单默认装；开机自启 / 防火墙默认不装（Level=2 > INSTALLLEVEL=1） -->
     <Feature Id="MainFeature" Title="LinkX (required)" Description="LinkX executable and registry entries" Level="1">
       <ComponentRef Id="MainExecutable"/>
+      <ComponentRef Id="ProtocolHandler"/>
     </Feature>
     <Feature Id="StartMenuFeature" Title="Start Menu shortcut" Description="Create a LinkX shortcut in the Start Menu" Level="1">
       <ComponentRef Id="ProgramMenuDirComponent"/>

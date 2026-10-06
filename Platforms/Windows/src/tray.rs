@@ -11,9 +11,9 @@ const TRAY_ID: u32 = 1;
 /// 托盘回调消息。`window.rs` 的 WndProc 必须有一支接住它 —— 只注册不接，图标亮着却点不动
 pub(crate) const CALLBACK: u32 = WM_APP + 1;
 /// 托盘协议版本 4（Vista+）：让气泡走现代通知路径，并在 Win10/11 归入"通知中心"。
-/// ⚠ 它同时**改掉事件语义**：v4 之后鼠标消息（`WM_LBUTTONUP` / `WM_LBUTTONDBLCLK` 那一套）
-/// 不再发送，选中图标上报的是 `NIN_SELECT`(0) / `NIN_KEYSELECT`(1)。`window.rs` 的回调分支
-/// 必须按这个口径判，否则图标亮着但点它没反应。
+/// ⚠ 它按头文件的说法会**改掉事件语义**（选中图标上报 `NIN_SELECT`/`NIN_KEYSELECT` 而不是
+/// `WM_LBUTTONUP` 那一套），但本机实测到的仍是 `WM_*` 码 —— 两种说法都有依据，所以 `window.rs`
+/// 的回调分支两套都判，并在认不出时把码值记进日志。
 const NOTIFYICON_VERSION_4: u32 = 4;
 
 static mut NID: Option<NOTIFYICONDATAW> = None;

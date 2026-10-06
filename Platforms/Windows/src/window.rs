@@ -23,7 +23,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::{
     DragAcceptFiles, DragFinish, DragQueryFileW, ILCreateFromPathW, ILFree, SHCreateDataObject,
-    SHDoDragDrop, HDROP,
+    SHDoDragDrop, HDROP, NIN_SELECT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, IsIconic, LoadCursorW, LoadIconW, PostMessageW,
@@ -50,11 +50,11 @@ use crate::theme;
 /// 特性不划算，故取字面量 —— 取字面量的常量必须由下方 `assert!` 与单测把值锁死
 const WM_MOUSELEAVE: u32 = 0x02A3;
 
-/// 托盘 v4 协议下"选中图标"的两个事件码（shellapi.h：`NIN_SELECT` = 0x000、
-/// `NIN_KEYSELECT` = 0x001）。windows-rs 没把它们导出到可用的位置，取字面量 ⇒ 值由下方
-/// 断言与单测锁死。升到 v4 之后鼠标消息**不再**发给本窗口，所以只按 `WM_*` 判的分支等于没修。
-const NIN_SELECT: u32 = 0x0000;
-const NIN_KEYSELECT: u32 = 0x0001;
+/// 托盘"选中图标"的事件码。shellapi.h 里 `NIN_SELECT = WM_USER + 0`（0x400）、
+/// `NIN_KEYSELECT = WM_USER + 1`：`NIN_SELECT` 取 windows-rs 的绑定值（写错就是"某些机器上
+/// 点图标没反应"，而且不报任何错），`NIN_KEYSELECT` 绑定里没有，按头文件关系从它推出来。
+/// 系统升到 v4 之后可能改上报这一套码而不是鼠标消息，所以回调分支里 `NIN_*` 与 `WM_*` **两套都判**。
+const NIN_KEYSELECT: u32 = NIN_SELECT + 1;
 
 /// 编译期锁定关键 Win32 常量值：取字面量的常量必须有值断言
 const _: () = {
@@ -75,8 +75,11 @@ const _: () = {
     assert!(WM_LBUTTONUP == 0x0202);
     assert!(WM_LBUTTONDOWN == 0x0201);
     // 托盘回调按这些值分发；写错就是"图标亮着、点它没反应"，且不会有任何报错
-    assert!(NIN_SELECT == 0x0000);
-    assert!(NIN_KEYSELECT == 0x0001);
+    assert!(
+        NIN_SELECT == 0x0400,
+        "NIN_SELECT = WM_USER + 0，取错值点图标没反应"
+    );
+    assert!(NIN_KEYSELECT == 0x0401, "NIN_KEYSELECT = WM_USER + 1");
     assert!(WM_LBUTTONDBLCLK == 0x0203);
     assert!(WM_CAPTURECHANGED == 0x0215);
     assert!(WM_MOUSEMOVE == 0x0200);
@@ -374,7 +377,7 @@ const ALBUM_DRAG_PX: i32 = 6;
 /// 把一段文本写进本机剪贴板，并登记为「本端已应用内容」。
 /// 防回声不能省：不登记的话 `WM_CLIPBOARDUPDATE` 会把它当成本机新复制的内容再推回对端
 /// （手机弹一条自己刚发来的通知）。整行复制与"只复制验证码"共用这一条出口
-fn copy_locally(st: &mut UiState, payload: Option<String>) -> Option<String> {
+pub(crate) fn copy_locally(st: &mut UiState, payload: Option<String>) -> Option<String> {
     let payload = payload.filter(|p| !p.is_empty())?;
     st.last_applied_clip = payload.clone();
     st.copied_at = Some(Instant::now());
@@ -1317,14 +1320,14 @@ fn drain_pending_toasts() -> bool {
     let Some(arc) = shared_state() else {
         return false;
     };
-    // 先取出再调用 Shell API，避免持锁期间做系统调用
-    let queued: Vec<(String, String)> = std::mem::take(&mut arc.lock().unwrap().pending_toasts);
+    // 先取出再调用系统 API，避免持锁期间做系统调用
+    let queued = std::mem::take(&mut arc.lock().unwrap().pending_toasts);
     if queued.is_empty() {
         return false;
     }
-    for (title, text) in queued {
-        if !unsafe { crate::tray::show_balloon(&title, &text) } {
-            // 弹窗被系统拒绝：记一次可读原因，便于真机排障（相同内容不重复刷屏）
+    for card in queued {
+        if !crate::toast::publish(arc, &card) {
+            // 两条路都走不通：记一次可读原因，便于真机排障（相同内容不重复刷屏）
             let msg =
                 "[系统弹窗失败] 托盘图标未建立或被系统禁止（检查「通知和操作」设置）".to_string();
             arc.lock().unwrap().push_error(msg);
@@ -1622,8 +1625,6 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
         }
         WM_TIMER => {
             let toasts = drain_pending_toasts();
-            // 系统媒体卡：本线程就是消息循环所在的那条，卡片状态与按钮派发都在这里
-            crate::smtc::tick();
             // 仅在确有动画或内容变化时重绘，静止时不空转
             let need = toasts
                 || shared_state()
@@ -1716,8 +1717,9 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
             LRESULT(0)
         }
         // 托盘图标回调。以前只注册不接：图标亮着，点它没任何反应，最小化之后只能去任务栏找。
-        // 事件码取 `LOWORD(lParam)`：v4 协议下 `NIN_SELECT`/`NIN_KEYSELECT` 与鼠标消息（`WM_LBUTTONUP`
-        // 那一套）**都**从这里上报，`HIWORD` 是图标 ID。漏一套就是"某些机器上点了没反应"。
+        // 事件码取 `LOWORD(lParam)`（本机实测：`HIWORD` 是图标 ID，不解读）。头文件说升到 v4
+        // 之后选中图标上报的是 `NIN_SELECT`/`NIN_KEYSELECT`，而本机看到的是 `WM_*` 那一套
+        // —— 两套都判，漏一套就是"某些机器上点了没反应"，且它一个字都不报。
         crate::tray::CALLBACK => {
             match (lparam.0 as u32) & 0xFFFF {
                 WM_RBUTTONUP | WM_CONTEXTMENU => show_tray_menu(hwnd),
@@ -1727,7 +1729,15 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                     // 判错就是"图标亮着、点它没反应"。最小化时释放过的后备缓冲由 `WM_PAINT` 重建
                     bring_to_front(hwnd);
                 }
-                _ => {}
+                other => {
+                    // 没认出的事件码：记下码值本身。真机报"点图标没反应"时，这条是唯一读数
+                    debuglog::log!(
+                        debuglog::Level::Info,
+                        "ui",
+                        "tray.event.unknown",
+                        &[("code", &format!("0x{other:04X}"))]
+                    );
+                }
             }
             LRESULT(0)
         }
