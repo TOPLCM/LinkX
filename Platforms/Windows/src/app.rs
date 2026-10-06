@@ -937,7 +937,6 @@ impl Worker {
                     "speed_x100": m.speed_x100,
                     "volume": m.volume,
                     // 封面只报有没有对上以及多大，不报内容：验收要的是"这条链路通了"，不是把图搬回控制面
-                    "cover_bytes": st.cover_of_current().map(|c| c.jpeg.len()).unwrap_or(0),
                 })
             }),
             // 通知列表必须能从控制面读出来（"手机发通知 → 电脑展示"不能只靠截图验收）；与 /state 的 clip 同口径，不另发明端点，所有验收脚本读同一份快照。
@@ -3685,7 +3684,6 @@ fn apply_event(st: &mut UiState, ev: EngineEvent) {
                 state_code::PAIRED | state_code::REPAIRED | state_code::RECONNECTING
             ) {
                 st.media = None;
-                st.media_cover = None;
                 st.battery = None;
             }
         }
@@ -3831,12 +3829,6 @@ fn apply_event(st: &mut UiState, ev: EngineEvent) {
             if !crate::features::enabled(crate::features::Module::MediaControl) {
                 return;
             }
-            let key =
-                crate::state::media_track_key(&package, &title, &artist);
-            // 换歌即撤封面：新封面可能还在路上（甚至这首根本没有封面），留着旧图就是错配
-            if st.media_cover.as_ref().map(|c| c.track_key.as_str()) != Some(key.as_str()) {
-                st.media_cover = None;
-            }
             st.media = Some(crate::state::MediaView {
                 package,
                 title,
@@ -3848,13 +3840,6 @@ fn apply_event(st: &mut UiState, ev: EngineEvent) {
                 speed_x100,
                 volume,
             });
-        }
-        // 封面与"媒体控制"开关同口径：开关关了，连"手机上正在放什么"都不落进状态，图更不能例外。
-        EngineEvent::MediaCover { track_key, jpeg } => {
-            if !crate::features::enabled(crate::features::Module::MediaControl) {
-                return;
-            }
-            st.media_cover = Some(crate::state::MediaCoverView { track_key, jpeg });
         }
         // 播放指令是"电脑 → 手机"方向的，Windows 收到它说明对端把方向搞反了：不执行、也不静默，留一条错误。
         EngineEvent::MediaCommand { .. } => {

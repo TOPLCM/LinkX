@@ -9,7 +9,7 @@
 //! 16 FileTaskFailed `u64 id|u16 reason`；17 FileTaskCancelled 同 16（**取消不是失败**，收端据此删残留文件）；18 AlbumListReq `u32 page|u32 per_page`；
 //! 19 AlbumThumbReq `u64 id|u32 edge`；20 AlbumFullReq `u32 count|count × u64 id`（count ≤ 256）；
 //! 21 NotifyReplyReq `u32 reply_id|i32 notification_id|i32 action_index|u16 pkg|u16 tag|u16 result_key|u16 text`。21 以下已占用，新事件从 22 起加。
-//! 手机是生产者的 `MediaState`/`MediaCover`/`DeviceStatus`/回复回执 **故意不编码**——Android 收不到自己发出的东西；取消收尾（FILE_DONE{cancelled:true}）不另发 kind 9：引擎在解码处就转成 17。
+//! 手机是生产者的 `MediaState`/`DeviceStatus`/回复回执 **故意不编码**——Android 收不到自己发出的东西；取消收尾（FILE_DONE{cancelled:true}）不另发 kind 9：引擎在解码处就转成 17。
 
 use std::collections::HashSet;
 // 仅调试控制面用到；不带 feature 的交付构建里它们没有使用者，单列 cfg 以免 unused import。
@@ -24,8 +24,8 @@ use jni::objects::{JByteArray, JClass, JString};
 use jni::sys::{jboolean, jbyteArray, jint, jlong, jstring};
 use jni::JNIEnv;
 use linkx_protocol::pb::{
-    AlbumItem, AlbumList, AlbumThumb, DeviceStatus, FileMeta, MediaCover, MediaState,
-    NotificationDismiss, NotificationPush, NotificationReplyAck,
+    AlbumItem, AlbumList, AlbumThumb, DeviceStatus, FileMeta, MediaState, NotificationDismiss,
+    NotificationPush, NotificationReplyAck,
 };
 use linkx_session::engine::{EngineConfig, EngineEvent, EngineRole, SessionEngine};
 
@@ -571,7 +571,6 @@ fn encode_event(out: &mut Vec<u8>, ev: &EngineEvent) {
         // 这里不用 `_ =>` 兜底：将来给 EngineEvent 加变体时，漏写编码要在编译期
         // 暴露出来，而不是悄悄变成"事件发了但对端解不出来"。
         EngineEvent::MediaState { .. } => return,
-        EngineEvent::MediaCover { .. } => return,
         EngineEvent::DeviceStatus { .. } => return,
         // 电脑下发的播放控制指令 → Kotlin 侧交给 MediaControl 执行
         EngineEvent::MediaCommand {
@@ -797,33 +796,6 @@ pub extern "system" fn Java_com_linkx_app_NativeCore_nativeSendMediaState(
             ts_ms,
         };
         with_engine(handle, |e| e.send_media_state(&s, ts_ms)).unwrap_or(false)
-    }))
-    .unwrap_or(false);
-    jint::from(sent as u8)
-}
-
-/// 推送当前曲目封面（手机 → 电脑）。`track_key` 是"这张图属于哪首歌"的凭据，
-/// 与 `nativeSendMediaState` 的 package/title/artist 三段同口径拼接；局域网未绑定时
-/// 引擎直接拒发（返回 0），调用方不必自己判断链路。
-#[no_mangle]
-pub extern "system" fn Java_com_linkx_app_NativeCore_nativeSendMediaCover(
-    mut env: JNIEnv<'_>,
-    _class: JClass<'_>,
-    handle: jlong,
-    track_key: JString<'_>,
-    jpeg: JByteArray<'_>,
-    ts_ms: jlong,
-) -> jint {
-    let sent = catch_unwind(AssertUnwindSafe(|| -> bool {
-        let (Ok(key), Ok(bytes)) = (env.get_string(&track_key), env.convert_byte_array(&jpeg))
-        else {
-            return false;
-        };
-        let c = MediaCover {
-            track_key: key.to_string_lossy().into_owned(),
-            jpeg: bytes.into(),
-        };
-        with_engine(handle, |e| e.send_media_cover(&c, ts_ms)).unwrap_or(false)
     }))
     .unwrap_or(false);
     jint::from(sent as u8)
