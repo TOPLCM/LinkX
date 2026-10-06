@@ -19,7 +19,7 @@ use thiserror::Error;
 pub use chunk::{
     chunk_range, chunks_total, crc32, sha256, Chunk, ChunkError, Chunker, FileHasher, CHUNK_SIZE,
 };
-pub use task::{FileId, SendTask, TransferDirection, TransferProgress, TransferState};
+pub use task::{FileId, SendTask, TransferState};
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum TransferError {
