@@ -15,6 +15,7 @@
 手机侧相册条目与目标设备默认**自动发现**（清单见 `--help`），也可以显式指定。
 """
 import argparse
+import glob
 import hashlib
 import json
 import os
@@ -85,26 +86,34 @@ def wait_for(predicate, timeout, interval=1.0):
     return None, time.time() - t0
 
 
+def log_files():
+    """埋点按大小轮转成 `linkx-debug.ndjson`、`linkx-debug.1.ndjson`……只认当前那份，
+    刚轮转过就什么都读不到：判据会把"明明成了"报成"没起播"，异常扫描会报"零异常"。"""
+    d = os.path.join(os.environ["APPDATA"], "LinkX", "Logs")
+    return sorted(glob.glob(os.path.join(d, "linkx-debug*.ndjson")))
+
+
 def ndjson_events(names, since_ms):
     """读电脑端埋点（追加写，取尾部即可）。判"这一轮到底成没成"只该问它，不该问界面行。"""
-    path = os.path.join(os.environ["APPDATA"], "LinkX", "Logs", "linkx-debug.ndjson")
-    try:
-        size = os.path.getsize(path)
-        with open(path, "rb") as f:
-            f.seek(max(0, size - 2_000_000))
-            chunk = f.read().decode("utf-8", "replace")
-    except OSError:
-        return []
     out = []
-    for line in chunk.splitlines():
-        if not line.startswith("{"):
-            continue
+    for path in log_files():
         try:
-            e = json.loads(line)
-        except json.JSONDecodeError:
+            size = os.path.getsize(path)
+            with open(path, "rb") as f:
+                f.seek(max(0, size - 2_000_000))
+                chunk = f.read().decode("utf-8", "replace")
+        except OSError:
             continue
-        if e.get("event") in names and e.get("ts_ms", 0) >= since_ms:
-            out.append((e["ts_ms"], e.get("fields") or {}))
+        for line in chunk.splitlines():
+            if not line.startswith("{"):
+                continue
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if e.get("event") in names and e.get("ts_ms", 0) >= since_ms:
+                out.append((e["ts_ms"], e.get("fields") or {}))
+    out.sort(key=lambda x: x[0])
     return out
 
 
@@ -327,8 +336,7 @@ def main():
     errs = state().get("errors") or []
     print("UI errors:", json.dumps(errs[-6:], ensure_ascii=False))
 
-    log = os.path.join(os.environ["APPDATA"], "LinkX", "Logs", "linkx-debug.ndjson")
-    bad = collections_scan(log)
+    bad = collections_scan(log_files())
     print("埋点异常:", json.dumps(bad, ensure_ascii=False))
     print("\n=== 结论 ===")
     print("FAILS:", len(fails))
@@ -343,29 +351,31 @@ def shutil_rmtree(d):
     shutil.rmtree(d, ignore_errors=True)
 
 
-def collections_scan(log):
+def collections_scan(logs):
+    """扫一遍所有埋点文件（含轮转件）。只看当前那份会把"日志刚轮转"读成"零异常"。"""
     import collections
 
     c = collections.Counter()
-    try:
-        for line in open(log, encoding="utf-8", errors="replace"):
-            if not line.startswith("{"):
-                continue
-            try:
-                e = json.loads(line).get("event", "")
-            except json.JSONDecodeError:
-                continue
-            if e in (
-                "orphan_chunk",
-                "file.late_frame",
-                "tcp.queue_full",
-                "tcp.rx.drop_stale",
-                "tcp.prebind_drop",
-                "log_dropped",
-            ):
-                c[e] += 1
-    except OSError as ex:
-        return {"scan_failed": str(ex)}
+    for log in logs:
+        try:
+            for line in open(log, encoding="utf-8", errors="replace"):
+                if not line.startswith("{"):
+                    continue
+                try:
+                    e = json.loads(line).get("event", "")
+                except json.JSONDecodeError:
+                    continue
+                if e in (
+                    "orphan_chunk",
+                    "file.late_frame",
+                    "tcp.queue_full",
+                    "tcp.rx.drop_stale",
+                    "tcp.prebind_drop",
+                    "log_dropped",
+                ):
+                    c[e] += 1
+        except OSError as ex:
+            return {"scan_failed": str(ex)}
     return dict(c)
 
 
