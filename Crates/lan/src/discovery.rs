@@ -24,6 +24,29 @@ pub const DISCOVERY_PEER_TIMEOUT: Duration = Duration::from_secs(10);
 /// 单个信标数据报上限（HELLO 属 TLV 模式 ≤64B，超长一律视为垃圾包）
 pub const DISCOVERY_MAX_BEACON_LEN: usize = 64;
 
+/// 由 IPv4 地址与前缀长度算子网的**定向广播**地址（192.168.1.24/24 → 192.168.1.255）。
+///
+/// 为什么需要它：`255.255.255.255` 是"有限广播"，Windows 只按路由表挑**一个**出口网卡发一次。
+/// 装了 VMware / Docker / WSL 的机器上那个出口经常是虚拟网卡，信标就永远到不了手机所在的 WLAN
+/// —— 而发送本身返回成功，所以"发没发出去"根本看不出来。定向广播的目的地址落在具体网段里，
+/// 路由表会替每个网段各挑对网卡，这才是多网卡环境唯一可靠的发法。
+///
+/// `/0`（默认路由）的"定向广播"就是 `255.255.255.255`，那条本来就在发，留在这里只会让
+/// `32 - prefix` 移出界；`/31` 与 `/32` 没有广播语义；回环、链路本地（APIPA 的 169.254/16）、
+/// 组播与全零地址发出去也不会有人听，一律 `None`。
+/// **私网段（192.168/16、10/8）必须留着** —— 那正是家庭与办公室局域网，
+/// 用 `Ipv4Addr::is_global()` 过滤会把它一起滤掉。
+pub fn directed_broadcast(ip: Ipv4Addr, prefix: u8) -> Option<Ipv4Addr> {
+    if prefix == 0 || prefix >= 31 || ip.is_loopback() || ip.is_link_local() || ip.is_multicast() {
+        return None;
+    }
+    // 到这里 prefix 一定在 1..=30，`32 - prefix` 不可能移出界
+    let mask = u32::MAX << (32 - u32::from(prefix));
+    let bcast = u32::from(ip) | !mask;
+    let out = Ipv4Addr::from(bcast);
+    (!out.is_unspecified() && !out.is_loopback()).then_some(out)
+}
+
 /// `pump` 的接收缓冲：必须装得下任意一个 IPv4 UDP 数据报——不是留余量，是跨平台正确性。
 /// Windows 上 recv_from 缓冲小于数据报时**不会**像 Linux 那样静默截断投递，而是返回
 /// WSAEMSGSIZE 并消费掉该包，于是本轮提前结束，**同一轮后续到达的正常信标一起被吞掉**。
@@ -32,6 +55,32 @@ pub const DISCOVERY_MAX_DATAGRAM_LEN: usize = 65_535;
 /// 对端表条目上限（见 `PeerTable::push_capped`）：正常局域网里几十台设备已经是极限，
 /// 这个数只为挡住"源地址无穷多"把表和网络扫描成本一起拖大。
 pub const MAX_PEER_ENTRIES: usize = 64;
+
+/// 这一轮信标要发往哪些地址：有限广播 + 本机各子网的定向广播 + 手动单播目标。
+///
+/// 单独成函数是因为多网卡这件事只能靠这张表判对错：发往 `255.255.255.255` 在装了 VMware 的
+/// 机器上**照样返回成功**（只是从虚拟网卡出去了），所以"sent 计数"证明不了任何事。
+/// 手动 IP 那批是单播、端口来自对端上报，既不能改端口也不能被去重吃掉。
+fn beacon_targets(
+    port: u16,
+    subnet_targets: &[Ipv4Addr],
+    extra_targets: &[SocketAddr],
+) -> Vec<SocketAddr> {
+    let mut addrs: Vec<SocketAddr> =
+        vec![SocketAddr::new(IpAddr::V4(DISCOVERY_BROADCAST_ADDR), port)];
+    for ip in subnet_targets {
+        let t = SocketAddr::new(IpAddr::V4(*ip), port);
+        if !addrs.contains(&t) {
+            addrs.push(t);
+        }
+    }
+    for t in extra_targets {
+        if !addrs.contains(t) {
+            addrs.push(*t);
+        }
+    }
+    addrs
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveryBeacon {
@@ -310,6 +359,9 @@ pub struct UdpDiscovery {
     peers: PeerTable,
     /// 除有限广播外的额外单播目标（手动 IP / 测试）
     extra_targets: Vec<SocketAddr>,
+    /// 本机各子网的定向广播地址。多网卡时由调用方定期重算喂进来（见 [`directed_broadcast`]）；
+    /// 空表就是旧行为：只发 `255.255.255.255`。
+    subnet_targets: Vec<Ipv4Addr>,
     interval: Duration,
     last_broadcast: Option<Instant>,
     stats: DiscoveryStats,
@@ -338,6 +390,7 @@ impl UdpDiscovery {
             socket,
             peers: PeerTable::default(),
             extra_targets: Vec::new(),
+            subnet_targets: Vec::new(),
             interval: DISCOVERY_BROADCAST_INTERVAL,
             last_broadcast: None,
             stats: DiscoveryStats::default(),
@@ -376,6 +429,21 @@ impl UdpDiscovery {
         }
     }
 
+    /// 换一批本机子网的定向广播目标。变了才落一条埋点：插拔网线、开关 VMware 都会改这张表，
+    /// 排查"手机搜不到电脑"时这是第一条要对的时间线。
+    pub fn set_subnet_targets(&mut self, targets: Vec<Ipv4Addr>) {
+        if targets == self.subnet_targets {
+            return;
+        }
+        let list = targets
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        self.subnet_targets = targets;
+        debuglog::log!(Level::Info, "lan", "udp.subnets", &[("to", &list)]);
+    }
+
     pub fn targets(&self) -> &[SocketAddr] {
         &self.extra_targets
     }
@@ -386,7 +454,7 @@ impl UdpDiscovery {
         self.peers.upsert_manual(addr, now)
     }
 
-    /// 立即广播一次（有限广播 + 全部单播目标）
+    /// 立即广播一次（有限广播 + 本机每个子网的定向广播 + 全部单播目标）
     pub fn broadcast(
         &mut self,
         beacon: &DiscoveryBeacon,
@@ -394,8 +462,8 @@ impl UdpDiscovery {
     ) -> Result<BroadcastReport, DiscoveryError> {
         let payload = beacon.encode()?;
         let mut report = BroadcastReport::default();
-        let broadcast = SocketAddr::new(IpAddr::V4(DISCOVERY_BROADCAST_ADDR), self.port);
-        for target in std::iter::once(broadcast).chain(self.extra_targets.iter().copied()) {
+        let addrs = beacon_targets(self.port, &self.subnet_targets, &self.extra_targets);
+        for target in addrs {
             match self.socket.send_to(&payload, target) {
                 Ok(_) => report.sent += 1,
                 Err(_) => report.failed += 1,
@@ -729,5 +797,109 @@ mod tests {
         assert!(tick.updated.is_empty());
         assert_eq!(tick.expired.len(), 1);
         assert!(b.peers().is_empty());
+    }
+
+    /// 定向广播地址算错是**静默**的：地址照样发得出去，只是没有对端在听。
+    /// 所以每个分支都要有值断言，尤其"私网段必须留着"这一条 —— 用 `is_global()` 过滤
+    /// 会把 192.168/16 与 10/8 整个滤掉，那正是本产品唯一工作的环境。
+    #[test]
+    fn directed_broadcast_covers_the_real_lans_and_skips_the_silent_ones() {
+        let v4 = |o: [u8; 4]| Ipv4Addr::from(o);
+        assert_eq!(
+            directed_broadcast(v4([192, 168, 1, 24]), 24),
+            Some(v4([192, 168, 1, 255])),
+            "家庭 WLAN 最常见的那一段"
+        );
+        assert_eq!(
+            directed_broadcast(v4([10, 0, 3, 7]), 8),
+            Some(v4([10, 255, 255, 255])),
+            "10/8 私网不许被当成「非全局」滤掉"
+        );
+        assert_eq!(
+            directed_broadcast(v4([172, 16, 4, 9]), 20),
+            Some(v4([172, 16, 15, 255]))
+        );
+        assert_eq!(
+            directed_broadcast(v4([192, 168, 56, 1]), 24),
+            Some(v4([192, 168, 56, 255])),
+            "VMware 宿主网卡也发：多一个没人听的广播，比漏掉真网卡便宜"
+        );
+        assert_eq!(
+            directed_broadcast(v4([192, 168, 1, 30]), 28),
+            Some(v4([192, 168, 1, 31])),
+            "非字节对齐的前缀也要算对：.30/28 落在 16–31 这一块"
+        );
+        for (ip, pfx) in [
+            ([127, 0, 0, 1], 8u8),
+            ([169, 254, 1, 9], 16),
+            ([224, 0, 0, 1], 4),
+            // 默认路由：它的"定向广播"就是 255.255.255.255，那条本来就在发
+            ([192, 168, 1, 9], 0),
+            ([192, 168, 1, 9], 31),
+            ([192, 168, 1, 9], 32),
+            ([192, 168, 1, 9], 33),
+        ] {
+            assert_eq!(
+                directed_broadcast(v4(ip), pfx),
+                None,
+                "{}/{} 不该产生广播目标",
+                Ipv4Addr::from(ip),
+                pfx
+            );
+        }
+    }
+
+    /// `32 - prefix` 移出界是这条函数唯一能把自己弄崩的地方：debug 下 panic（我们的
+    /// profile 是 `panic = "abort"`，等于整个进程没了），优化后悄悄把**本机自己的地址**
+    /// 当广播目标发出去 —— 发送照样返回成功，信标却永远到不了手机。系统给的
+    /// `OnLinkPrefixLength` 是 u8，隧道/PPP 网卡报什么值不由我们决定，所以要全档扫一遍。
+    #[test]
+    fn directed_broadcast_survives_every_prefix_the_os_might_report() {
+        let v4 = |o: [u8; 4]| Ipv4Addr::from(o);
+        let ip = v4([192, 168, 1, 24]);
+        for prefix in 0u8..=40 {
+            let out = directed_broadcast(ip, prefix);
+            if prefix == 0 || prefix >= 31 {
+                assert_eq!(out, None, "{prefix} 不该有广播目标");
+                continue;
+            }
+            let b = out.unwrap_or(ip);
+            assert_ne!(b, ip, "{prefix} 算出了本机地址本身，等于静默不发");
+            assert!(
+                !b.is_unspecified() && !b.is_loopback(),
+                "{prefix} 算出了不能用的目标"
+            );
+        }
+    }
+
+    /// 发往 `255.255.255.255` 在 VMware/Docker 机器上返回成功却到不了手机，所以"sent 计数"
+    /// 证明不了多网卡这一课 —— 判据只能是这张目标表里**每个网段都在**。
+    #[test]
+    fn beacon_targets_fan_out_to_every_subnet_and_keep_manual_unicast_ports() {
+        let port = 55676u16;
+        let s = |o: [u8; 4]| SocketAddr::new(IpAddr::V4(Ipv4Addr::from(o)), port);
+        let subnets = vec![
+            Ipv4Addr::new(192, 168, 1, 255),
+            Ipv4Addr::new(192, 168, 56, 255),
+            Ipv4Addr::new(192, 168, 1, 255), // 同网段两块网卡：只留一份
+        ];
+        // 手动 IP 用的是对端报上来的端口，不能被统一改成自己的端口
+        let manual = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 8, 0, 5)), 41000);
+        let got = beacon_targets(port, &subnets, &[manual]);
+        assert_eq!(
+            got,
+            vec![
+                s([255, 255, 255, 255]),
+                s([192, 168, 1, 255]),
+                s([192, 168, 56, 255]),
+                manual
+            ],
+            "有限广播打底、每个网段各一份、手动单播连端口一起原样保留"
+        );
+        // 空表 = 旧行为，一条不多发
+        assert_eq!(
+            beacon_targets(port, &[], &[]),
+            vec![s([255, 255, 255, 255])]
+        );
     }
 }

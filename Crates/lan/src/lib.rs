@@ -9,9 +9,10 @@ pub mod stream;
 pub mod transport;
 
 pub use discovery::{
-    BeaconError, BroadcastReport, DiscoveryBeacon, DiscoveryError, DiscoveryStats, DiscoveryTick,
-    PeerEntry, PeerTable, UdpDiscovery, DISCOVERY_BROADCAST_ADDR, DISCOVERY_BROADCAST_INTERVAL,
-    DISCOVERY_MAX_BEACON_LEN, DISCOVERY_PEER_TIMEOUT, DISCOVERY_UDP_PORT,
+    directed_broadcast, BeaconError, BroadcastReport, DiscoveryBeacon, DiscoveryError,
+    DiscoveryStats, DiscoveryTick, PeerEntry, PeerTable, UdpDiscovery, DISCOVERY_BROADCAST_ADDR,
+    DISCOVERY_BROADCAST_INTERVAL, DISCOVERY_MAX_BEACON_LEN, DISCOVERY_PEER_TIMEOUT,
+    DISCOVERY_UDP_PORT,
 };
 pub use stream::{
     parse_manual_addr, probe_manual, LinkStats, RxFrame, StreamError, StreamLink, SESSION_ID_LEN,
