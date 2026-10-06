@@ -158,23 +158,31 @@ struct Files {
 }
 
 impl Files {
-    /// 打开当前文件；若上次会话残留的当前文件非空，先滚入历史（避免截断丢现场）。
+    /// 以**追加**方式打开当前文件。
+    ///
+    /// 以前这里"当前文件非空就先滚进历史"，本意是不覆盖上一次会话的现场。但第二实例随时会被拉起
+    /// （双击图标、拖文件进来、点通知卡上的按钮都是拉起一个 `linkx.exe <参数>` 的新进程），
+    /// 而运行中的那个实例还握着旧文件：改名之后它继续往被改名的 inode 里写，
+    /// 于是文档里承诺的 `linkx-debug.ndjson` 变成近乎空的壳，排查的人按路径找不到日志。
+    /// 追加既保住了现场，也不会有人把别人的文件挪走；字节数按盘上实际大小起算，上限照旧生效。
     fn open(dir: &Path, max_bytes: u64, keep: usize) -> io::Result<Self> {
-        for (stem, ext) in [("linkx-debug", "ndjson"), ("linkx-debug", "log")] {
-            let base = dir.join(format!("{stem}.{ext}"));
-            let nonempty = fs::metadata(&base).map(|m| m.len() > 0).unwrap_or(false);
-            if nonempty {
-                rotate_file(dir, stem, ext, keep)?;
-            }
-        }
-        let ndjson = BufWriter::new(File::create(dir.join(NDJSON_BASE))?);
-        let text = BufWriter::new(File::create(dir.join(TEXT_BASE))?);
+        let base = |name: &str| {
+            let path = dir.join(name);
+            let bytes = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)?;
+            io::Result::Ok((BufWriter::new(file), bytes))
+        };
+        let (ndjson, ndjson_bytes) = base(NDJSON_BASE)?;
+        let (text, text_bytes) = base(TEXT_BASE)?;
         Ok(Self {
             dir: dir.to_path_buf(),
             ndjson,
             text,
-            ndjson_bytes: 0,
-            text_bytes: 0,
+            ndjson_bytes,
+            text_bytes,
             max_bytes,
             keep,
         })
@@ -661,6 +669,41 @@ mod tests {
         // 文本版为单行（换行被替换）
         let text = build_text(5, Level::Error, "session", "err", &[("ctx", "a\nb")]);
         assert_eq!(text, "[5] ERROR session err ctx=a b");
+    }
+
+    #[test]
+    fn a_second_start_appends_instead_of_moving_the_live_file_away() {
+        let _g = guard();
+        disable();
+        let dir = temp_dir("append");
+        let base = dir.join(NDJSON_BASE);
+
+        enable_with_limits(&dir, 4096, KEEP_HISTORY_FILES).unwrap();
+        log(Level::Info, "test", "first.start", &[]);
+        assert!(flush());
+        disable();
+        let after_first = fs::read_to_string(&base).unwrap();
+        assert!(
+            after_first.contains("first.start"),
+            "第一次开的现场要还在当前文件里"
+        );
+
+        // 第二实例拉起（双击图标 / 点通知卡按钮都是）：不许把运行中实例的文件改名挪走
+        enable_with_limits(&dir, 4096, KEEP_HISTORY_FILES).unwrap();
+        log(Level::Info, "test", "second.start", &[]);
+        assert!(flush());
+        disable();
+
+        let after_second = fs::read_to_string(&base).unwrap();
+        assert!(
+            after_second.contains("first.start") && after_second.contains("second.start"),
+            "两次现场都该留在同一个当前文件里：{after_second}"
+        );
+        assert!(
+            !dir.join("linkx-debug.1.ndjson").exists(),
+            "重启不该产生历史文件——运行中的实例还握着被改名的那个 inode"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
