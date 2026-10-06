@@ -184,7 +184,9 @@ pub(crate) fn request_show_from_raw(hwnd_raw: isize) {
 }
 
 /// 收进托盘：只藏窗口。进程、托盘图标、定时器与 worker 线程都原地不动，之后由托盘图标
-/// 那一下、或再双击一次程序图标（走 `ipc` 的唤醒请求）把窗口摆回来
+/// 那一下、或再双击一次程序图标（走 `ipc` 的唤醒请求）把窗口摆回来。
+/// 顺手清显示资源：托盘才是这个程序大部分时间待着的地方，而 `SW_HIDE` 不发 `WM_SIZE`，
+/// 只挂在最小化那条路上等于没做。
 pub(crate) fn hide_to_tray(hwnd: HWND) {
     if hwnd.0.is_null() {
         return;
@@ -192,6 +194,16 @@ pub(crate) fn hide_to_tray(hwnd: HWND) {
     unsafe {
         let _ = ShowWindow(hwnd, SW_HIDE);
     }
+    shed_display_memory();
+}
+
+/// 窗口不再显示时释放"只为显示而存在"的资源并把内存优先级降到 LOW；恢复可见时再要回来。
+/// 双缓冲走 `CreateCompatibleBitmap`，位图记在会话的 GDI 堆上，所以本进程常驻不会因此变小 ——
+/// 这条买的是"不占别人的额度" + 相册那份记在自己头上的解码缓存。位图由下一次 `WM_PAINT` 重建。
+fn shed_display_memory() {
+    unsafe { release_back_buffer() };
+    crate::render::purge_thumb_dibs();
+    set_memory_priority(true);
 }
 
 /// 创建主窗口。入参是**逻辑尺寸**（96dpi 基准），按系统 DPI 换算成物理像素。
@@ -262,6 +274,9 @@ pub(crate) fn create_main_window(
         DragAcceptFiles(hwnd, true);
         if show {
             let _ = ShowWindow(hwnd, SHOW_WINDOW_CMD(5)); // SW_SHOW
+        } else {
+            // 这条路径永远等不到 `WM_SIZE`，优先级只能在这里降
+            set_memory_priority(true);
         }
         Some(hwnd)
     }
@@ -1441,6 +1456,8 @@ fn bring_to_front(hwnd: HWND) {
         let _ = SetForegroundWindow(hwnd);
         let _ = InvalidateRect(hwnd, None, true);
     }
+    // 藏在托盘里的那一次是 `SW_HIDE`，不送 `WM_SIZE`，优先级只能在这里要回来
+    set_memory_priority(false);
 }
 
 extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -1485,14 +1502,14 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
             LRESULT(1)
         }
         WM_SIZE => {
-            // 收进托盘/最小化：整窗后备缓冲在 225% 缩放下是 2160×1440 的 GDI 位图（约 12 MB），
-            // 而程序大部分时间待在托盘里 → 此刻释放它。判状态用 `IsIconic` 而不是 wparam 的
-            // `SIZE_MINIMIZED`（0 还原 / 1 最小化 / 2 最大化极易记错，记错了就变成"最大化时拆缓冲、
-            // 最小化时什么都不做"），并先让 DefWindowProc 更新状态再问。
-            // **定时器不能停**：`WM_TIMER` 还负责派发通知弹窗，空转由 `wants_repaint` 挡住
+            // 判状态用 `IsIconic` 而不是 wparam 的 `SIZE_MINIMIZED`（0 还原 / 1 最小化 / 2 最大化
+            // 极易记错，记错了就变成"最大化时拆缓冲、最小化时什么都不做"），并先让 DefWindowProc
+            // 更新状态再问。**定时器不能停**：`WM_TIMER` 还负责派发通知弹窗。
             let _ = unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
             if unsafe { IsIconic(hwnd) }.as_bool() {
-                unsafe { release_back_buffer() };
+                shed_display_memory();
+            } else {
+                set_memory_priority(false);
             }
             let _ = unsafe { InvalidateRect(hwnd, None, true) };
             LRESULT(0)
@@ -1757,6 +1774,46 @@ pub(crate) unsafe fn release_back_buffer() {
     if let Some(b) = BACK.take() {
         unsafe { destroy_back_buffer(b) };
     }
+}
+
+/// 窗口不再显示时把本进程的内存优先级降到 LOW，恢复可见时改回 NORMAL：内存吃紧时系统先换出
+/// "没在显示"的进程。它不会让任务管理器的数字变小（实测常驻 29.5 → 29.6 MB），改的是被牺牲的顺序。
+/// 结果必须落埋点 —— 这一调用失败时窗口一切如常，是"优化没生效但没人知道"的形态。
+fn set_memory_priority(low: bool) {
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, ProcessMemoryPriority, SetProcessInformation,
+        MEMORY_PRIORITY_INFORMATION, MEMORY_PRIORITY_LOW, MEMORY_PRIORITY_NORMAL,
+    };
+    let info = MEMORY_PRIORITY_INFORMATION {
+        MemoryPriority: if low {
+            MEMORY_PRIORITY_LOW
+        } else {
+            MEMORY_PRIORITY_NORMAL
+        },
+    };
+    let r = unsafe {
+        SetProcessInformation(
+            GetCurrentProcess(),
+            ProcessMemoryPriority,
+            &info as *const MEMORY_PRIORITY_INFORMATION as *const core::ffi::c_void,
+            std::mem::size_of::<MEMORY_PRIORITY_INFORMATION>() as u32,
+        )
+    };
+    let want = if low { "low" } else { "normal" };
+    let note = match &r {
+        Ok(()) => want.to_string(),
+        Err(e) => format!("{want} 没改成: {e}"),
+    };
+    debuglog::log!(
+        if r.is_ok() {
+            debuglog::Level::Info
+        } else {
+            debuglog::Level::Warn
+        },
+        "ui",
+        "mem.priority",
+        &[("note", &note)]
+    );
 }
 
 #[cfg(test)]
