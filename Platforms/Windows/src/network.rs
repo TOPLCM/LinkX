@@ -261,6 +261,71 @@ fn is_idle_io(msg: &str) -> bool {
         || m.contains("10035") // WSAEWOULDBLOCK
 }
 
+/// 本机每个可广播子网的**定向广播**地址。发现信标必须逐个网段各发一份，
+/// 只发 `255.255.255.255` 在装了 VMware / Docker / WSL 的机器上会从虚拟网卡出去，
+/// 手机所在的 WLAN 永远收不到 —— 而发送照样返回成功，所以日志看不出来。
+/// 判据与算法在 `linkx_lan::directed_broadcast`，这里只负责问系统要地址表。
+///
+/// 两趟调用：第一趟传空指针拿所需字节数（`ERROR_BUFFER_OVERFLOW` 把长度写回参数），
+/// 第二趟取数据。缓冲用 `Vec<u64>` 而不是 `Vec<u8>`：结构体要 8 字节对齐，
+/// 按 u8 分配拿到的指针可能没对齐，那是"偶尔崩"级别的错。
+/// 任何一步失败都返回**空表**——退回旧行为（只发有限广播）比完全不广播强。
+pub(crate) fn lan_broadcast_targets() -> Vec<std::net::Ipv4Addr> {
+    use std::net::Ipv4Addr;
+    use windows::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, NO_ERROR};
+    use windows::Win32::NetworkManagement::IpHelper::{
+        GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER,
+        GAA_FLAG_SKIP_FRIENDLY_NAME, GAA_FLAG_SKIP_MULTICAST, IP_ADAPTER_ADDRESSES_LH,
+    };
+    use windows::Win32::Networking::WinSock::{AF_INET, SOCKADDR_IN};
+
+    const AF_INET_U32: u32 = AF_INET.0 as u32;
+    // 跳过用不到的那几段链表：缓冲小一圈，也不用处理扩展字段
+    let flags = GAA_FLAG_SKIP_ANYCAST
+        | GAA_FLAG_SKIP_MULTICAST
+        | GAA_FLAG_SKIP_DNS_SERVER
+        | GAA_FLAG_SKIP_FRIENDLY_NAME;
+    let mut bytes: u32 = 0;
+    let mut out: Vec<Ipv4Addr> = Vec::new();
+    unsafe {
+        let probe = GetAdaptersAddresses(AF_INET_U32, flags, None, None, &mut bytes);
+        // 第一趟没有一台网卡可读（干净虚拟机上真会发生）：没什么可发，直接空表
+        if probe != ERROR_BUFFER_OVERFLOW.0 || bytes == 0 {
+            return out;
+        }
+        let words = (bytes as usize).div_ceil(8).max(1);
+        let mut buf = vec![0u64; words];
+        let ptr = buf.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
+        if GetAdaptersAddresses(AF_INET_U32, flags, None, Some(ptr), &mut bytes) != NO_ERROR.0 {
+            return out;
+        }
+        let mut adapter = ptr;
+        while !adapter.is_null() {
+            let mut unicast = (*adapter).FirstUnicastAddress;
+            while !unicast.is_null() {
+                let u = &*unicast;
+                let sa = u.Address.lpSockaddr;
+                if !sa.is_null()
+                    && (*sa).sa_family == AF_INET
+                    && u.Address.iSockaddrLength as usize >= std::mem::size_of::<SOCKADDR_IN>()
+                {
+                    let sin = &*(sa as *const SOCKADDR_IN);
+                    // `S_addr` 是网络字节序塞进一个本机 u32，所以要 from_be 才能还原成 a.b.c.d
+                    let ip = Ipv4Addr::from(u32::from_be(sin.sin_addr.S_un.S_addr));
+                    if let Some(b) = linkx_lan::directed_broadcast(ip, u.OnLinkPrefixLength) {
+                        if !out.contains(&b) {
+                            out.push(b);
+                        }
+                    }
+                }
+                unicast = u.Next;
+            }
+            adapter = (*adapter).Next;
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,5 +361,23 @@ mod tests {
         let mut one = VecDeque::new();
         one.push_back((1, vec![0u8; MAX_TCP_RX_BYTES]));
         assert!(rx_full(&one, 1), "队列里已经有东西了才谈背压");
+    }
+
+    /// 本机网卡枚举的机器无关判据：不该出现回环与链路本地地址，也不该有重复。
+    /// 具体有几条、是哪几个网段**按机器变**，所以这里不钉死数量 —— 钉死了就变成
+    /// "在开发机上绿、在 CI 上红"的那种测试。
+    #[test]
+    fn lan_broadcast_targets_are_sane_on_this_machine() {
+        let got = lan_broadcast_targets();
+        for v in &got {
+            assert!(!v.is_loopback(), "回环网段不该出现在广播目标里：{v}");
+            assert!(!v.is_link_local(), "APIPA 的 169.254/16 没人会听：{v}");
+            assert!(!v.is_multicast());
+        }
+        let mut sorted = got.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), got.len(), "同网段两块网卡也只留一份：{got:?}");
+        println!("本机定向广播目标 = {got:?}");
     }
 }

@@ -35,7 +35,8 @@ use crate::identity;
 use crate::network::TcpService;
 use crate::settings;
 use crate::state::{
-    IdentityChangeView, NotificationItem, SharedState, UiState, TASK_DIR_RECV, TASK_DIR_SEND,
+    IdentityChangeView, NotificationItem, ReplyTarget, SharedState, ToastCard, UiState,
+    TASK_DIR_RECV, TASK_DIR_SEND,
 };
 use crate::transfer::{
     file_base_name, new_file_id, open_chunker, percent_of, unique_path, RecvSession, SendSession,
@@ -47,6 +48,9 @@ const LOCAL_NAME: &str = "Windows-PC";
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// 引擎 tick 周期（心跳/超时）
 const TICK_INTERVAL: Duration = Duration::from_secs(1);
+/// 重问系统"本机有哪些子网"的间隔：多网卡（VMware / Docker / WSL）时定向广播要逐个网段发，
+/// 而网卡集合会随插网线、开关虚拟机变化。比 3 秒的广播节拍慢五倍，成本可忽略。
+const SUBNET_REFRESH: Duration = Duration::from_secs(15);
 /// 每轮最多发送的分块数——**吞吐上限的来源**。
 /// 按 8 给只有 ~10 MB/s（千兆局域网下明显慢于链路能力）；按 32 给 ≈40 MB/s，仍然有界：
 /// 一轮写不完就下一轮，不会把整条链路堵死（socket 写是同步的，背压由内核缓冲自然形成）。
@@ -58,7 +62,7 @@ const BLE_WRITE_BUDGET_PER_ROUND: usize = 8;
 /// 单轮 `flush_ble_out` 的**时长**上限。写是异步发起、下一轮轮询的，但链路与 OS 调用
 /// 仍可能慢；150 ms 小于 POLL_INTERVAL 量级，保证死链路下 worker 也按节奏收包、发心跳。
 const BLE_WRITE_TIME_BUDGET: Duration = Duration::from_millis(150);
-/// 单个接收任务的最大续传请求次数（防对端坏块死循环）：数的是整任务的轮次，与 transfer 侧数块的 `MAX_CRC_RETRIES` 是两回事
+/// 单个接收任务的最大续传请求次数（防对端坏块死循环）：数的是整任务的轮次，不是每个块各一次
 const MAX_RESUME_TRIES: u32 = 8;
 /// 引擎侧入站分块积压的字节上限。超过就**本轮不再从读队列取帧**（见 `pump_tcp_rx`），让背压顺着
 /// 读队列 → 读线程 → socket 缓冲区回到对端。必须有它：TCP 是可靠字节流，从可靠流里丢一帧不会触发
@@ -328,6 +332,7 @@ fn worker_loop(hwnd_raw: isize, state: SharedState) {
         config_sent: false,
         discovery: None,
         discovery_failed_at: None,
+        subnet_refreshed_at: None,
         pending_send: None,
         send: None,
         recv: Vec::new(),
@@ -418,6 +423,8 @@ struct Worker {
     discovery: Option<UdpDiscovery>,
     /// 上次 UDP 发现启动失败时刻
     discovery_failed_at: Option<Instant>,
+    /// 上次重问系统"本机有哪些子网"的时刻（多网卡的定向广播目标，见 `pump_discovery`）
+    subnet_refreshed_at: Option<Instant>,
 
     /// 待发送文件路径（等配对 + TCP 就绪）
     pending_send: Option<String>,
@@ -888,10 +895,12 @@ impl Worker {
                 }))
                 .collect::<Vec<_>>(),
             // 传输任务的界面真值："状态在推进但画面不动"这类缺陷，只有把百分比导出才能和屏幕像素对表。
+            // 窗口要和画面同源（画几行就导几行）：任务行按名字原地更新，同名任务重发时不会挪到队首，
+            // 导得比画面少就会让自动化把"这行没在窗口里"读成"这单没成"。
             "ui_file_tasks": st
                 .file_tasks
                 .iter()
-                .take(4)
+                .take(crate::render::FILE_MAX_ROWS)
                 .map(|t| serde_json::json!({
                     "name": t.name,
                     "dir": if t.direction == crate::state::TASK_DIR_SEND { "send" } else { "recv" },
@@ -2799,7 +2808,7 @@ impl Worker {
         }
     }
 
-    /// 续传请求（`RecvAction::RequestResume` 的平台侧等价）：超限则放弃该任务。
+    /// 续传请求（收端发现空洞时向对端要补发）：超限则放弃该任务。
     /// **同一个起点只问一次**：一个空洞之后的每一块都会走到这里，按到达次数算预算的话，292 块的
     /// 视频会在几毫秒内烧光 `MAX_RESUME_TRIES` 并放弃接收——而对端还没来得及重传任何一块。重复请求也没有信息量。
     fn request_resume(&mut self, file_id: u64, from_index: u32, why: &str) {
@@ -3535,6 +3544,15 @@ impl Worker {
             return;
         };
         let now = Instant::now();
+        // 网卡集合会变（插网线、开关 VMware/WSL、连上另一个 WiFi），所以定期重问系统一次。
+        // 15 秒 = 比 3 秒的广播节拍慢五倍，成本可以忽略，又不至于换网之后干等半分钟。
+        if self
+            .subnet_refreshed_at
+            .is_none_or(|t| now.saturating_duration_since(t) >= SUBNET_REFRESH)
+        {
+            self.subnet_refreshed_at = Some(now);
+            d.set_subnet_targets(crate::network::lan_broadcast_targets());
+        }
         let beacon = DiscoveryBeacon {
             advert_name: LOCAL_NAME.to_string(),
             os: linkx_protocol::OS_WINDOWS,
@@ -3627,24 +3645,46 @@ impl Worker {
             dropped.push(row);
         }
         {
+            // 半截文件"还在不在、删没删掉"要先问完再进锁：`exists()` 与 `remove_file()` 都是磁盘
+            // 操作（杀软扫到新删文件时几百毫秒很常见），而 paint 线程要拿的是同一把界面锁
+            enum Cleanup {
+                Gone,
+                Removed,
+                Kept,
+            }
+            let cleaned: Vec<(String, std::path::PathBuf, Cleanup)> = dropped
+                .iter()
+                .map(|(name, _, path)| {
+                    let outcome = if !path.exists() {
+                        Cleanup::Gone
+                    } else if fs::remove_file(path).is_ok() {
+                        Cleanup::Removed
+                    } else {
+                        Cleanup::Kept
+                    };
+                    (name.clone(), path.clone(), outcome)
+                })
+                .collect();
             let mut st = self.state.lock().unwrap();
             if let Some(p) = queued {
                 st.push_error(format!("{p} 还在排队就被取消：设备已解绑"));
             }
-            for (name, _, path) in &dropped {
+            for (name, _, _) in &dropped {
                 st.update_file_task(name, TASK_DIR_RECV, 0, "已取消");
-                if !path.exists() {
-                    st.push_toast("接收已取消".to_string(), format!("{name}：设备已解绑"));
-                } else if fs::remove_file(path).is_ok() {
-                    st.push_toast(
+            }
+            for (name, path, outcome) in &cleaned {
+                match outcome {
+                    Cleanup::Gone => {
+                        st.push_toast("接收已取消".to_string(), format!("{name}：设备已解绑"))
+                    }
+                    Cleanup::Removed => st.push_toast(
                         "接收已取消".to_string(),
                         format!("{name}：设备已解绑，没收完的半截文件已删除"),
-                    );
-                } else {
-                    st.push_error(format!(
+                    ),
+                    Cleanup::Kept => st.push_error(format!(
                         "接收已取消（{name}），但半截文件没删掉，请手动清理：{}",
                         path.display()
-                    ));
+                    )),
                 }
             }
         }
@@ -3729,7 +3769,7 @@ fn apply_event(st: &mut UiState, ev: EngineEvent) {
                     ("reply", if can_reply { "1" } else { "0" }),
                 ]
             );
-            // 联动系统消息通知：手机来的通知在电脑上弹一条弹窗（由 UI 线程执行）；两个持久化设置项——弹窗总开关、是否显示正文。
+            // 联动系统消息通知：手机来的通知在电脑上弹一张卡（由 UI 线程执行）；两个持久化设置项——弹窗总开关、是否显示正文。
             if st.toast_enabled {
                 let title_for_toast = if title.is_empty() {
                     package.clone()
@@ -3743,7 +3783,21 @@ fn apply_event(st: &mut UiState, ev: EngineEvent) {
                 } else {
                     text.clone()
                 };
-                st.push_toast(title_for_toast, body);
+                // 卡片上的两颗按钮：正文被用户设为隐藏时不许把验证码印在卡上，
+                // 对端没挂 RemoteInput 时不许出现「发送」
+                let copy = st
+                    .toast_show_content
+                    .then(|| linkx_session::code_extract::extract_code(&title, &text))
+                    .flatten()
+                    .map(|code| code.digits);
+                let reply = can_reply.then(|| ReplyTarget {
+                    package: package.clone(),
+                    tag: tag.clone(),
+                    notification_id,
+                    action_index: reply_action_index,
+                    result_key: reply_result_key.clone(),
+                });
+                st.push_toast_card(ToastCard { title: title_for_toast, body, copy, reply });
             }
             st.push_notification(NotificationItem {
                 package,
