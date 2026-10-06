@@ -16,7 +16,8 @@ const RESERVED_WINDOWS_NAMES: &[&str] = &[
 
 /// 单段文件名的字节上限。**留了 15 字节余量**给收件侧的唯一化后缀（`" (1)"`）：顶格 255 再拼
 /// 后缀就越过 NTFS 的 255 字节段长上限，`File::create` 报 os error 123（第二次传同名文件必踩）。
-const MAX_LEN: usize = 240;
+/// 公开给 fuzz 目标与断言用（`Tests/fuzz/fuzz_targets/sanitize_filename.rs`），别再写死 240。
+pub const MAX_LEN: usize = 240;
 
 const REPLACEMENT: &str = "_";
 const PLACEHOLDER: &str = "untitled";
@@ -179,7 +180,11 @@ mod tests {
             "….\\..\\windows\\system32",
             "con",
             "CON.TXT",
+            "COM1",
+            "nul",
             "report:a.txt",
+            "a:",
+            "%2e%2e%2f%2e%2e%2fwindows",
             "a  ",
             "b.",
             "\u{0}x",
@@ -191,14 +196,24 @@ mod tests {
         for raw in corpus {
             for rules in [Rules::Windows, Rules::Fat] {
                 let out = sanitize(raw, rules);
-                assert!(
-                    !out.contains('/') && !out.contains('\\'),
-                    "{raw:?} → {out:?}"
-                );
+                // 分隔符与 NTFS 的流分隔符 `:` 都要塌掉：留下任一个，"一个文件名"就不止一段
+                for c in ['/', '\\', ':'] {
+                    assert!(!out.contains(c), "{raw:?} → {out:?} 里留了 {c:?}");
+                }
                 assert!(out != "." && out != "..", "{raw:?} → {out:?}");
                 assert!(out.len() <= MAX_LEN, "{raw:?} → {} 字节", out.len());
                 assert!(!out.is_empty(), "{raw:?} 不该交出空名字");
+                assert!(
+                    !out.chars().any(char::is_control),
+                    "控制字符没清干净: {out:?}"
+                );
+                assert!(
+                    !out.ends_with('.') && !out.ends_with(' '),
+                    "留了会被文件系统静默丢掉、因而会撞名的尾巴: {out:?}"
+                );
                 assert_eq!(sanitize(&out, rules), out, "净化不自幂：{raw:?}");
+                // 净化产物必须直接过合法性判定：两套口径互不认同的话，"净化过了"不可信
+                assert!(is_valid(&out, rules), "净化产物过不了自己的校验: {out:?}");
             }
         }
     }
