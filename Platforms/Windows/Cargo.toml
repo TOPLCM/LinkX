@@ -37,22 +37,24 @@ windows = { version = "0.58.0", features = [
     "Devices_Enumeration",
     "Foundation",
     "Foundation_Collections",
-    # 系统媒体控制卡（音量面板那张卡）：元数据/封面/进度由 Windows.Media 喂，按钮事件回这里
-    "Media",
-    "Media_Control",
     "Storage_Streams",
+    # 系统通知卡（toast）：托盘气泡结构上没有按钮位，「复制验证码」「发送」两颗只能走 toast
+    "Data_Xml_Dom",
+    "UI_Notifications",
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     # 0.4.2 相册：JPEG 缩略图解码走系统 WIC（WindowsCodecs.dll，本进程已加载）
     "Win32_Graphics_Imaging",
+    "Win32_NetworkManagement_IpHelper",
+    # IP_ADAPTER_ADDRESSES_LH 这套结构体在 windows-rs 里同时挂在 Ndis 与 WinSock 两个 feature 下
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
     "Win32_Security",
     "Win32_Security_Cryptography",
     "Win32_System_Com",
     # 预览态用 WIC 编码器在内存里造纯色 JPEG（不落盘）
     "Win32_System_Com_StructuredStorage",
-    # WinRT 激活工厂：SystemMediaTransportControls 要按窗口句柄取
-    "Win32_System_WinRT",
     # 单张拖出：SHDoDragDrop 的 DROPEFFECT / IDataObject 在这一模块
     "Win32_System_Ole",
     "Win32_System_DataExchange",
@@ -69,6 +71,8 @@ windows = { version = "0.58.0", features = [
     "Win32_UI_Shell",
     # 单张拖出：ILCreateFromPathW + SHCreateDataObject 在 Shell.Common（返回的 IDataObject 由 shell 实现）
     "Win32_UI_Shell_Common",
+    # 通知卡的应用身份要写进开始菜单快捷方式的 shell 属性表（SHGetPropertyStoreFromParsingName）
+    "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_WindowsAndMessaging",
     # 0.5.0 F54b：相册拖出改拉模型要自己实现 IDataObject/IStream（windows-implement 的接口表）
     "implement",

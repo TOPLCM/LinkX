@@ -12,8 +12,8 @@
 
   本文件用 WiX Toolset 5.0.2 在 Windows 主机上 `wix build -arch x64` 构建通过，表结构与 ICE
   校验按 Scripts/build-msi-windows.sh 的断言核对过，内嵌 CAB 还原后与源文件逐字节一致。
-  **未做**：真实 msiexec install → uninstall 回环（非交互 shell 里 msiexec 的 GUI 交互跑不通，
-  /qn 与 /? 都会挂起），只做了 CAB 级回环 —— 交付后建议在干净机器上手动装一遍。
+  真实 msiexec 图形安装 → 卸载已在开发机跑通：七页向导逐页截图核对中文渲染，卸载后安装目录、
+  桌面快捷方式、HKCU\SOFTWARE\LinkX 与防火墙规则均无残留。
 
   移植时相对 wixl 版的三点调整（v4/v5 方言差异，非行为变化）：
     * 预定义目录用 <StandardDirectory>；wixl 的 <Directory Id="TARGETDIR" Name="SourceDir"> 外壳取消。
@@ -22,10 +22,12 @@
     * <Product Id=...> 不再手写（v4 自动生成并写入 ProductCode），UpgradeCode 与全部 Component
       Guid 原样保留 —— 这两组 GUID 是跨版本升级与组件归并的关键，改动会让用户旧安装无法升级。
 
-  继承 wixl 版的所有约束（务必保留）：
-    * 所有 MSI 可见文本（含 SummaryInformation）一律用 ASCII 英文。原因见 SummaryInformation
-      元素上方的注释：wixl 字符串池不支持 CJK（实测）；WiX v5.0.2 则会把 SummaryInformation 的
-      非 ASCII 字符替换成 0x7f（实测），所以两份源在这里都必须写 ASCII。
+  文本语言（两份源不同，别当成笔误）：
+    * 本文件（WiX v5）向导文本用简体中文。实测依据：向 Dialog 表塞一条中文标题重新出包，
+      产物字符串池里 UTF-8 中文字节原样保留，用 MsiRecordGetString 读回仍是正确汉字。
+    * wixl 版（LinkX.wxs）必须保持 ASCII 英文 —— wixl 0.103 的字符串池存不下非 ASCII（实测）。
+    * <SummaryInformation> 例外，两份都保持 ASCII：WiX v5.0.2 会把其中的非 ASCII 字符替换成 0x7f，
+      表现是「添加/删除程序 → 更多信息」里一串问号（实测，与源文件编码、BOM、Codepage 无关）。
     * 自定义向导 7 页（Welcome / License / InstallDir / Components / VerifyReady /
       Progress / Exit）全部保留 —— WiX v4/v5 仍支持 <UI>/<Dialog>/<Control>/<TextStyle>/
       <Publish>/<Subscribe>/<InstallUISequence>，已实测。
@@ -43,11 +45,7 @@
 
     <!-- per-user：无需 UAC，默认装到 %LOCALAPPDATA%\Programs\LinkX -->
     <!--
-      SummaryInformation 这里**不能写中文**：WiX v5.0.2 会把每个非 ASCII 字符替换成 0x7f，
-      导致「添加/删除程序 → 更多信息」里显示成 "LinkX ?????(???):???? / ???? / ?????"。
-      用 32KB 的最小探针（只含一条中文 SummaryInformation）实测确认：产物 MSI 里 UTF-8 / UTF-16LE
-      的中文字节均为 0 次命中，而 0x7f 连续出现。这是 WiX v5.0.2 的 <SummaryInformation> 处理缺陷，
-      与源文件编码、BOM、Codepage 均无关。
+      这里**不能写中文**（WiX v5.0.2 会把非 ASCII 字符替换成 0x7f），详见文件头「文本语言」一条。
       注：wixl 版（LinkX.wxs）的 <Package Description/Comments> 实测**能**存中文，两份源在此处
       无法保持字面一致，只能接受这一处差异。
     -->
@@ -90,7 +88,7 @@
 
     <!-- 主要升级：检测同 UpgradeCode 的旧版本，先卸旧再装新 -->
     <MajorUpgrade AllowSameVersionUpgrades="yes"
-                  DowngradeErrorMessage="A newer version of LinkX is already installed. Please uninstall it first."/>
+                  DowngradeErrorMessage="电脑上已安装更新版本的 LinkX，请先卸载当前版本。"/>
 
     <UIRef Id="LinkX_UI"/>
 
@@ -154,19 +152,20 @@
     </InstallExecuteSequence>
 
     <!-- 功能/组件：主程序恒装；开始菜单默认装；开机自启 / 防火墙默认不装（Level=2 > INSTALLLEVEL=1） -->
-    <Feature Id="MainFeature" Title="LinkX (required)" Description="LinkX executable and registry entries" Level="1">
+    <Feature Id="MainFeature" Title="LinkX 主程序（必装）" Description="LinkX 主程序与注册表信息" Level="1">
       <ComponentRef Id="MainExecutable"/>
+      <ComponentRef Id="ProtocolHandler"/>
     </Feature>
-    <Feature Id="StartMenuFeature" Title="Start Menu shortcut" Description="Create a LinkX shortcut in the Start Menu" Level="1">
+    <Feature Id="StartMenuFeature" Title="开始菜单快捷方式" Description="在开始菜单创建 LinkX 快捷方式" Level="1">
       <ComponentRef Id="ProgramMenuDirComponent"/>
     </Feature>
-    <Feature Id="DesktopShortcutFeature" Title="Desktop shortcut" Description="Create a LinkX shortcut on the Desktop" Level="1">
+    <Feature Id="DesktopShortcutFeature" Title="桌面快捷方式" Description="在桌面创建 LinkX 快捷方式" Level="1">
       <ComponentRef Id="DesktopShortcutComponent"/>
     </Feature>
-    <Feature Id="AutoStartFeature" Title="Run at logon" Description="Start LinkX automatically when you log on (HKCU Run)" Level="2">
+    <Feature Id="AutoStartFeature" Title="登录时自动启动" Description="登录 Windows 后自动启动 LinkX（HKCU Run）" Level="2">
       <ComponentRef Id="AutoStartEntry"/>
     </Feature>
-    <Feature Id="FirewallFeature" Title="Firewall rule" Description="Add a TCP 55676 inbound rule for private networks" Level="2">
+    <Feature Id="FirewallFeature" Title="防火墙规则" Description="为专用网络添加 TCP 55676 入站规则" Level="2">
       <ComponentRef Id="FirewallMarker"/>
     </Feature>
   </Package>
@@ -206,6 +205,22 @@
     </Component>
   </Fragment>
 
+  <!--
+    通知卡按钮的回话通道：`linkx://` 注册在 HKCU\Software\Classes（per-user，不提权也写得进去）。
+    系统点「复制验证码」/「发送」时另起一个 linkx.exe 并把 URI 作为参数交给它，第二实例原样转交给
+    运行中的实例（见 Platforms/Windows/src/toast.rs）。参数里只有一次性口令，对不上就丢，
+    所以这条注册项本身不构成"别的程序能替用户发回复"的口子。卸载时由 RemoveRegistryValues 回收。
+  -->
+  <Fragment>
+    <Component Id="ProtocolHandler" Directory="INSTALLFOLDER" Guid="{C4281F77-8154-435C-97D1-6504D0469533}">
+      <RegistryValue Root="HKCU" Key="Software\Classes\linkx" Type="string"
+                     Value="URL:LinkX 通知卡按钮" KeyPath="yes"/>
+      <RegistryValue Root="HKCU" Key="Software\Classes\linkx" Name="URL Protocol" Type="string" Value=""/>
+      <RegistryValue Root="HKCU" Key="Software\Classes\linkx\shell\open\command" Type="string"
+                     Value="&quot;[INSTALLFOLDER]linkx.exe&quot; &quot;%1&quot;"/>
+    </Component>
+  </Fragment>
+
   <!-- 可选组件：开机自启（HKCU\...\Run），卸载时由 MSI 自动移除该注册表值 -->
   <Fragment>
     <Component Id="AutoStartEntry" Directory="INSTALLFOLDER" Guid="5F2A9C31-7D64-4E88-9B21-0C3E5A7D9F14">
@@ -228,7 +243,7 @@
     <Component Id="ProgramMenuDirComponent" Directory="ProgramMenuDir" Guid="7E4B1C42-9D3A-4E5F-9C77-2A8F5B6D4E31">
       <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuDir" Name="LinkX"
                 Target="[INSTALLFOLDER]linkx.exe" WorkingDirectory="INSTALLFOLDER"
-                Icon="LinkXIcon.ico" Description="Cross-device link tool"/>
+                Icon="LinkXIcon.ico" Description="跨设备互联工具"/>
       <RegistryValue Root="HKCU" Key="Software\LinkX" Name="StartMenu" Type="integer"
                      Value="1" KeyPath="yes"/>
       <RemoveFolder Id="RemoveProgramMenuDir" On="uninstall" Directory="ProgramMenuDir"/>
@@ -244,7 +259,7 @@
     <Component Id="DesktopShortcutComponent" Directory="DesktopFolder" Guid="{A7C1E5D2-6B48-4F03-9E2D-1C5A8B74D390}">
       <Shortcut Id="DesktopShortcut" Directory="DesktopFolder" Name="LinkX"
                 Target="[INSTALLFOLDER]linkx.exe" WorkingDirectory="INSTALLFOLDER"
-                Icon="LinkXIcon.ico" Description="Cross-device link tool"/>
+                Icon="LinkXIcon.ico" Description="跨设备互联工具"/>
       <RegistryValue Root="HKCU" Key="Software\LinkX" Name="DesktopShortcut" Type="integer"
                      Value="1" KeyPath="yes"/>
     </Component>
@@ -252,45 +267,46 @@
 
   <Fragment>
     <UI Id="LinkX_UI">
-      <TextStyle Id="LinkX_Font_Title" FaceName="Segoe UI" Size="9" Bold="yes"/>
-      <TextStyle Id="LinkX_Font_Normal" FaceName="Segoe UI" Size="8"/>
+      <!-- 中文字形 Segoe UI 没有，靠系统字体链接兜底不稳定，直接点微软雅黑；字号不动，避免撑破既有控件高度 -->
+      <TextStyle Id="LinkX_Font_Title" FaceName="Microsoft YaHei" Size="9" Bold="yes"/>
+      <TextStyle Id="LinkX_Font_Normal" FaceName="Microsoft YaHei" Size="8"/>
       <Property Id="DefaultUIFont" Value="LinkX_Font_Normal"/>
 
       <!-- 1) Welcome -->
-      <Dialog Id="WelcomeDlg" Width="370" Height="270" Title="[ProductName] Setup">
+      <Dialog Id="WelcomeDlg" Width="370" Height="270" Title="[ProductName] 安装向导">
         <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0"/>
         <Control Id="Title" Type="Text" X="20" Y="15" Width="330" Height="18" Transparent="yes" NoPrefix="yes"
-                 Text="Welcome to the [ProductName] Setup Wizard"/>
+                 Text="欢迎使用 [ProductName] 安装向导"/>
         <Control Id="WelcomeText" Type="Text" X="20" Y="60" Width="330" Height="130" Transparent="yes" NoPrefix="yes"
-                 Text="This wizard will guide you through the installation of [ProductName] [ProductVersion].&#10;&#10;This is a per-user installation: no administrator privileges are required, and files are installed under your personal profile.&#10;&#10;Click Next to continue, or Cancel to exit."/>
+                 Text="本向导将引导您完成 [ProductName] [ProductVersion] 的安装。&#10;&#10;这是当前用户的安装：不需要管理员权限，程序装在您自己的账户目录里。&#10;&#10;点击「下一步」继续，点击「取消」退出。"/>
         <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0"/>
-        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Disabled="yes" Text="Back"/>
-        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Next">
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Disabled="yes" Text="上一步"/>
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="下一步">
           <Publish Event="NewDialog" Value="LicenseDlg"/>
         </Control>
-        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="取消">
           <Publish Event="EndDialog" Value="Exit"/>
         </Control>
       </Dialog>
 
       <!-- 2) License agreement (must accept to continue) -->
-      <Dialog Id="LicenseDlg" Width="370" Height="270" Title="[ProductName] License Agreement">
+      <Dialog Id="LicenseDlg" Width="370" Height="270" Title="[ProductName] 许可协议">
         <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0"/>
         <Control Id="Title" Type="Text" X="20" Y="15" Width="330" Height="18" Transparent="yes" NoPrefix="yes"
-                 Text="License Agreement"/>
+                 Text="许可协议"/>
         <Control Id="LicenseNotice" Type="Text" X="20" Y="60" Width="330" Height="150" Sunken="yes" NoPrefix="yes"
-                 Text="LinkX is released under the GNU General Public License version 3 (GPL-3.0-or-later).&#10;&#10;You may use, study, modify and redistribute this software under the terms of GPL-3.0 or, at your option, any later version. If you distribute a modified version, you must pass along the corresponding source code under the same license.&#10;&#10;This software is provided AS IS, without warranty of any kind.&#10;&#10;The full license text ships with this installer (see the LICENSE file in the installation folder). Third-party components and their licenses are listed in THIRD_PARTY_LICENSES.md in the same folder."/>
+                 Text="LinkX 以 GNU 通用公共许可证第 3 版（GPL-3.0-or-later）发布。&#10;&#10;您可以在 GPL-3.0 或（由您选择）任意后续版本的条款下使用、研究、修改并再分发本软件。若您再分发修改后的版本，必须一并以同一许可证提供对应的源代码。&#10;&#10;本软件按「现状」提供，不提供任何形式的担保。&#10;&#10;许可全文随安装包分发，见安装目录里的 LICENSE 文件；第三方组件及其许可列在同一目录的 THIRD_PARTY_LICENSES.md 里。"/>
         <Control Id="AcceptCheck" Type="CheckBox" X="20" Y="218" Width="330" Height="17"
-                 Property="LicenseAccepted" CheckBoxValue="1" Text="I accept the terms in the License Agreement."/>
+                 Property="LicenseAccepted" CheckBoxValue="1" Text="我接受许可协议中的条款。"/>
         <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0"/>
-        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="Back">
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="上一步">
           <Publish Event="NewDialog" Value="WelcomeDlg"/>
         </Control>
-        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Next"
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="下一步"
                  EnableCondition="LicenseAccepted">
           <Publish Event="NewDialog" Value="InstallDirDlg"/>
         </Control>
-        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="取消">
           <Publish Event="EndDialog" Value="Exit"/>
         </Control>
       </Dialog>
@@ -305,12 +321,12 @@
         加 Indirect 后控件改绑 INSTALLFOLDER 目录属性（其值是 CostFinalize 算出的真实路径），
         与 WiX 官方 WixUI 的 BrowseDlg / InstallDirDlg 写法一致（Property="_BrowseProperty" Indirect="yes"）
       -->
-      <Dialog Id="InstallDirDlg" Width="370" Height="270" Title="[ProductName] Destination Folder">
+      <Dialog Id="InstallDirDlg" Width="370" Height="270" Title="[ProductName] 安装位置">
         <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0"/>
         <Control Id="Title" Type="Text" X="20" Y="15" Width="330" Height="18" Transparent="yes" NoPrefix="yes"
-                 Text="Destination Folder"/>
+                 Text="安装位置"/>
         <Control Id="Description" Type="Text" X="20" Y="52" Width="330" Height="20" Transparent="yes" NoPrefix="yes"
-                 Text="Choose the folder where [ProductName] will be installed."/>
+                 Text="选择要把 [ProductName] 装到哪个文件夹，也可以直接改下面这行路径。"/>
         <Control Id="FolderCombo" Type="DirectoryCombo" X="20" Y="78" Width="330" Height="80"
                  Property="WIXUI_INSTALLDIR" Indirect="yes" Fixed="no"/>
         <Control Id="FolderList" Type="DirectoryList" X="20" Y="78" Width="330" Height="130" Sunken="yes"
@@ -318,37 +334,37 @@
         <Control Id="PathEdit" Type="PathEdit" X="20" Y="214" Width="330" Height="17"
                  Property="WIXUI_INSTALLDIR" Indirect="yes"/>
         <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0"/>
-        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="Back">
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="上一步">
           <Publish Event="NewDialog" Value="LicenseDlg"/>
         </Control>
-        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Next">
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="下一步">
           <Publish Event="SetTargetPath" Value="[WIXUI_INSTALLDIR]" Order="1"/>
           <Publish Event="NewDialog" Value="ComponentsDlg" Order="2"/>
         </Control>
-        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="取消">
           <Publish Event="EndDialog" Value="Exit"/>
         </Control>
       </Dialog>
 
       <!-- 4) Components (checkboxes publish AddLocal/RemoveLocal feature selection) -->
-      <Dialog Id="ComponentsDlg" Width="370" Height="270" Title="[ProductName] Components">
+      <Dialog Id="ComponentsDlg" Width="370" Height="270" Title="[ProductName] 组件选择">
         <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0"/>
         <Control Id="Title" Type="Text" X="20" Y="15" Width="330" Height="18" Transparent="yes" NoPrefix="yes"
-                 Text="Components"/>
+                 Text="组件选择"/>
         <Control Id="Description" Type="Text" X="20" Y="52" Width="330" Height="20" Transparent="yes" NoPrefix="yes"
-                 Text="Select the optional components to install. You can change these later by running this installer again."/>
+                 Text="勾选要一并安装的可选组件。以后重新运行这个安装程序就能改。"/>
         <Control Id="ChkStartMenu" Type="CheckBox" X="25" Y="90" Width="330" Height="17"
-                 Property="OPT_STARTMENU" CheckBoxValue="1" Text="Create a Start Menu shortcut (recommended)"/>
+                 Property="OPT_STARTMENU" CheckBoxValue="1" Text="创建开始菜单快捷方式（推荐）"/>
         <Control Id="ChkAutoStart" Type="CheckBox" X="25" Y="120" Width="330" Height="17"
-                 Property="OPT_AUTOSTART" CheckBoxValue="1" Text="Start LinkX automatically when you log on"/>
+                 Property="OPT_AUTOSTART" CheckBoxValue="1" Text="登录 Windows 时自动启动 LinkX"/>
         <Control Id="ChkFirewall" Type="CheckBox" X="25" Y="150" Width="330" Height="34"
                  Property="OPT_FIREWALL" CheckBoxValue="1"
-                 Text="Add a Windows Firewall inbound rule (TCP 55676, private networks only). Requires administrator rights; skipped silently if not elevated."/>
+                 Text="添加 Windows 防火墙入站规则（TCP 55676，仅专用网络）。这条需要管理员权限，没提权时会被跳过。"/>
         <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0"/>
-        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="Back">
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="上一步">
           <Publish Event="NewDialog" Value="InstallDirDlg"/>
         </Control>
-        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Next">
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="下一步">
           <Publish Event="AddLocal" Value="StartMenuFeature" Condition='OPT_STARTMENU="1"' Order="1"/>
           <Publish Event="Remove" Value="StartMenuFeature" Condition='NOT OPT_STARTMENU="1"' Order="2"/>
           <Publish Event="AddLocal" Value="AutoStartFeature" Condition='OPT_AUTOSTART="1"' Order="3"/>
@@ -357,16 +373,16 @@
           <Publish Event="Remove" Value="FirewallFeature" Condition='NOT OPT_FIREWALL="1"' Order="6"/>
           <Publish Event="NewDialog" Value="VerifyReadyDlg" Order="7"/>
         </Control>
-        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="取消">
           <Publish Event="EndDialog" Value="Exit"/>
         </Control>
       </Dialog>
 
       <!-- 5) Confirm -->
-      <Dialog Id="VerifyReadyDlg" Width="370" Height="270" Title="[ProductName] Ready to Install">
+      <Dialog Id="VerifyReadyDlg" Width="370" Height="270" Title="[ProductName] 准备安装">
         <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0"/>
         <Control Id="Title" Type="Text" X="20" Y="15" Width="330" Height="18" Transparent="yes" NoPrefix="yes"
-                 Text="Ready to Install"/>
+                 Text="准备安装"/>
         <!--
           摘要行两条约束：
           1) 目录必须写 [INSTALLFOLDER]（目录属性，值为真实路径）；写 [WIXUI_INSTALLDIR] 只会展开出
@@ -375,65 +391,65 @@
              （v5 的 Control 不收 Condition 子元素，只能用属性）。
         -->
         <Control Id="VerifyText" Type="Text" X="20" Y="60" Width="330" Height="18" Transparent="yes" NoPrefix="yes"
-                 Text="Setup is ready to install [ProductName] [ProductVersion]."/>
+                 Text="安装程序已准备好安装 [ProductName] [ProductVersion]。"/>
         <Control Id="VerifyDir" Type="Text" X="20" Y="82" Width="330" Height="16" Transparent="yes" NoPrefix="yes"
-                 Text="Destination folder: [INSTALLFOLDER]"/>
+                 Text="安装到：[INSTALLFOLDER]"/>
         <Control Id="OptStartYes" Type="Text" X="20" Y="104" Width="330" Height="14" Transparent="yes" NoPrefix="yes"
-                 Text="Start Menu shortcut: Yes" Hidden="yes" ShowCondition='OPT_STARTMENU="1"'/>
+                 Text="开始菜单快捷方式：是" Hidden="yes" ShowCondition='OPT_STARTMENU="1"'/>
         <Control Id="OptStartNo" Type="Text" X="20" Y="104" Width="330" Height="14" Transparent="yes" NoPrefix="yes"
-                 Text="Start Menu shortcut: No" Hidden="yes" ShowCondition='NOT OPT_STARTMENU="1"'/>
+                 Text="开始菜单快捷方式：否" Hidden="yes" ShowCondition='NOT OPT_STARTMENU="1"'/>
         <Control Id="OptAutoYes" Type="Text" X="20" Y="120" Width="330" Height="14" Transparent="yes" NoPrefix="yes"
-                 Text="Run at logon: Yes" Hidden="yes" ShowCondition='OPT_AUTOSTART="1"'/>
+                 Text="开机自动启动：是" Hidden="yes" ShowCondition='OPT_AUTOSTART="1"'/>
         <Control Id="OptAutoNo" Type="Text" X="20" Y="120" Width="330" Height="14" Transparent="yes" NoPrefix="yes"
-                 Text="Run at logon: No" Hidden="yes" ShowCondition='NOT OPT_AUTOSTART="1"'/>
+                 Text="开机自动启动：否" Hidden="yes" ShowCondition='NOT OPT_AUTOSTART="1"'/>
         <Control Id="OptFwYes" Type="Text" X="20" Y="136" Width="330" Height="14" Transparent="yes" NoPrefix="yes"
-                 Text="Firewall rule: Yes" Hidden="yes" ShowCondition='OPT_FIREWALL="1"'/>
+                 Text="防火墙规则：是" Hidden="yes" ShowCondition='OPT_FIREWALL="1"'/>
         <Control Id="OptFwNo" Type="Text" X="20" Y="136" Width="330" Height="14" Transparent="yes" NoPrefix="yes"
-                 Text="Firewall rule: No" Hidden="yes" ShowCondition='NOT OPT_FIREWALL="1"'/>
+                 Text="防火墙规则：否" Hidden="yes" ShowCondition='NOT OPT_FIREWALL="1"'/>
         <Control Id="VerifyHint" Type="Text" X="20" Y="162" Width="330" Height="30" Transparent="yes" NoPrefix="yes"
-                 Text="Click Install to begin, or Back to change your settings."/>
+                 Text="点击「安装」开始，或点「上一步」回去改。"/>
         <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0"/>
-        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="Back">
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="上一步">
           <Publish Event="NewDialog" Value="ComponentsDlg"/>
         </Control>
-        <Control Id="Install" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Install">
+        <Control Id="Install" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="安装">
           <Publish Event="EndDialog" Value="Return"/>
         </Control>
-        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="取消">
           <Publish Event="EndDialog" Value="Exit"/>
         </Control>
       </Dialog>
 
       <!-- 6) Progress -->
-      <Dialog Id="ProgressDlg" Width="370" Height="270" Title="[ProductName] Setup" Modeless="yes">
+      <Dialog Id="ProgressDlg" Width="370" Height="270" Title="[ProductName] 正在安装" Modeless="yes">
         <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0"/>
         <Control Id="Title" Type="Text" X="20" Y="15" Width="330" Height="18" Transparent="yes" NoPrefix="yes"
-                 Text="Installing [ProductName]"/>
+                 Text="正在安装 [ProductName]"/>
         <Control Id="TextInstalling" Type="Text" X="20" Y="60" Width="330" Height="30" Transparent="yes" NoPrefix="yes"
-                 Text="Please wait while Setup installs [ProductName]."/>
-        <Control Id="StatusLabel" Type="Text" X="20" Y="100" Width="60" Height="15" Transparent="yes" NoPrefix="yes" Text="Status:"/>
+                 Text="请稍候，安装程序正在把 [ProductName] 装到您的电脑上。"/>
+        <Control Id="StatusLabel" Type="Text" X="20" Y="100" Width="60" Height="15" Transparent="yes" NoPrefix="yes" Text="状态："/>
         <Control Id="ActionText" Type="Text" X="80" Y="100" Width="270" Height="15" TabSkip="no">
           <Subscribe Event="ActionText" Attribute="Text"/>
         </Control>
-        <Control Id="ProgressBar" Type="ProgressBar" X="20" Y="120" Width="330" Height="12" ProgressBlocks="yes" Text="Progress">
+        <Control Id="ProgressBar" Type="ProgressBar" X="20" Y="120" Width="330" Height="12" ProgressBlocks="yes" Text="进度">
           <Subscribe Event="SetProgress" Attribute="Progress"/>
         </Control>
         <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0"/>
-        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="取消">
           <Publish Event="EndDialog" Value="Exit"/>
         </Control>
       </Dialog>
 
       <!-- 7) Finish -->
-      <Dialog Id="ExitDialog" Width="370" Height="270" Title="[ProductName] Setup Complete">
+      <Dialog Id="ExitDialog" Width="370" Height="270" Title="[ProductName] 安装完成">
         <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0"/>
         <Control Id="Title" Type="Text" X="20" Y="15" Width="330" Height="18" Transparent="yes" NoPrefix="yes"
-                 Text="Setup Complete"/>
+                 Text="安装完成"/>
         <Control Id="ExitText" Type="Text" X="20" Y="60" Width="330" Height="80" Transparent="yes" NoPrefix="yes"
-                 Text="[ProductName] [ProductVersion] has been installed.&#10;&#10;You can start LinkX from the Start Menu. Click Finish to exit Setup."/>
+                 Text="[ProductName] [ProductVersion] 已经装好了。&#10;&#10;您可以从桌面或开始菜单启动 LinkX。点击「完成」关闭本向导。"/>
         <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0"/>
-        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Disabled="yes" Text="Back"/>
-        <Control Id="Finish" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Cancel="yes" Text="Finish">
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Disabled="yes" Text="上一步"/>
+        <Control Id="Finish" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Cancel="yes" Text="完成">
           <Publish Event="EndDialog" Value="Return"/>
         </Control>
       </Dialog>

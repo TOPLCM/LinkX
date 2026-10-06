@@ -24,7 +24,8 @@ use crate::window::post_state_changed;
 
 /// 单实例互斥体名（`Global\` = 跨会话；本产品是单用户桌面应用，够用且避免多窗口抢端口）
 const MUTEX_NAME: PCWSTR = w!("Global\\LinkX.SingleInstance");
-/// IPC 命名管道路径（**不放机密**：只传本机文件路径，且只接受本机连接）
+/// IPC 命名管道路径（**不放机密**：只传本机文件路径、把窗口叫回来的哨兵，以及通知卡按钮的
+/// 一次性口令；管道默认 DACL 只允许本机同一用户连接）
 const PIPE_PATH: &str = r"\\.\pipe\linkx_ipc";
 const PIPE_BUFFER: u32 = 4096;
 /// 一次连接最多等多久才认定"这个客户端不写了"。**必须待在客户端连接重试的预算之内**（≈1.4 s）
@@ -47,7 +48,10 @@ pub(crate) fn acquire_single_instance() -> bool {
         match handle {
             Ok(h) => {
                 let existed = err == ERROR_ALREADY_EXISTS;
-                if !existed {
+                if existed {
+                    // 第二实例只是"看一眼有没有人占着"，手上这个句柄不当值留着
+                    let _ = CloseHandle(h);
+                } else {
                     MUTEX_HANDLE.store(h.0 as isize, Ordering::Release);
                 }
                 !existed
@@ -199,6 +203,11 @@ fn pipe_loop(state: SharedState) {
             crate::window::request_show_from_raw(hwnd_raw);
             continue;
         }
+        // 通知卡上的按钮：口令校验与执行全在 `toast`，这里只认前缀
+        if path.starts_with(crate::toast::SCHEME) {
+            crate::toast::handle_activation(&state, &path);
+            continue;
+        }
         deliver(&state, &path);
     }
 }
@@ -207,20 +216,25 @@ fn pipe_loop(state: SharedState) {
 fn deliver(state: &SharedState, path: &str) {
     // 文件互传关了就不接转交：管道本身留着是给"再双击一次图标把窗口叫回来"用的（壳层职责）
     if !crate::features::enabled(crate::features::Module::FileTransfer) {
-        let mut st = state.lock().unwrap();
-        st.push_error(format!("文件互传已关闭，{path} 的转交没有接收"));
-        st.ui_rev += 1;
+        {
+            let mut st = state.lock().unwrap();
+            st.push_error(format!("文件互传已关闭，{path} 的转交没有接收"));
+            st.ui_rev += 1;
+        }
+        // `say` 是 stderr 阻塞写，不能占着界面锁做： paint 线程要拿同一把锁
         crate::say("[LinkX] 文件互传已关闭，本次转交未接收");
         return;
     }
     // 这是"本机任意进程 → 让 LinkX 把一个文件发给对端"的入口，两条底线：路径必须真的是个文件、
     // 只填输入框不代发。少了第二条，任何本机进程都能借已配对的 LinkX 静默外发它读到的任何文件。
     if !std::fs::metadata(path).is_ok_and(|m| m.is_file()) {
-        let mut st = state.lock().unwrap();
-        st.push_error(format!(
-            "收到一个外部发送请求，但 {path} 不是本机可读的普通文件，已忽略"
-        ));
-        st.ui_rev += 1;
+        {
+            let mut st = state.lock().unwrap();
+            st.push_error(format!(
+                "收到一个外部发送请求，但 {path} 不是本机可读的普通文件，已忽略"
+            ));
+            st.ui_rev += 1;
+        }
         crate::say(format!("[LinkX] 转交路径不可用，已拒绝: {path}"));
         return;
     }
@@ -324,5 +338,84 @@ mod tests {
             drop(c);
         });
         assert_eq!(buf.len(), 4096, "载荷上限 4 KiB 要硬生效");
+    }
+
+    /// 客户端一次写超上限时，余下的字节**不许**出现在下一条连接里。
+    /// `pipe_loop` 复用同一个管道实例连续服务，靠的就是 `DisconnectNamedPipe` 把没读走的
+    /// 部分丢掉；哪天换成多实例或 `TransactNamedPipe`，这条会先红。
+    /// 本机任意进程一次写 5000 字节就能污染此后每一条转交，所以值得钉住。
+    #[test]
+    fn overflow_from_one_client_does_not_leak_into_the_next_connection() {
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let path = format!(
+            "\\\\.\\pipe\\linkx_ipc_overflow_{}_{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        );
+        let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+        let mode = NAMED_PIPE_MODE(
+            PIPE_TYPE_BYTE.0 | PIPE_READMODE_BYTE.0 | PIPE_WAIT.0 | PIPE_REJECT_REMOTE_CLIENTS.0,
+        );
+        let handle = unsafe {
+            CreateNamedPipeW(
+                PCWSTR(wide.as_ptr()),
+                PIPE_ACCESS_INBOUND,
+                mode,
+                1,
+                PIPE_BUFFER,
+                PIPE_BUFFER,
+                0,
+                None,
+            )
+        };
+        assert!(!handle.is_invalid(), "建测试管道失败");
+        let mut server = unsafe { std::fs::File::from_raw_handle(handle.0) };
+        let h = HANDLE(server.as_raw_handle());
+
+        // 第一条连接：一次写 5000 字节，服务端按上限只取 4096
+        let first_client = {
+            let p = path.clone();
+            std::thread::spawn(move || {
+                let mut c = open_client(&p);
+                let _ = c.write_all(&[b'A'; 5000]);
+                drop(c);
+            })
+        };
+        assert!(connect(&mut server, h), "第一条连接握手失败");
+        let first = read_pipe_bounded(&mut server, h);
+        let _ = unsafe { DisconnectNamedPipe(h) };
+        let _ = first_client.join();
+        assert_eq!(first.len(), 4096, "第一条只该取到上限");
+
+        // 第二条连接：一条正常的转交，必须只看见自己那 17 字节
+        let second_client = {
+            let p = path.clone();
+            std::thread::spawn(move || {
+                let mut c = open_client(&p);
+                let _ = c.write_all(REAL_PATH);
+                drop(c);
+            })
+        };
+        assert!(connect(&mut server, h), "第二条连接握手失败");
+        let second = read_pipe_bounded(&mut server, h);
+        let _ = unsafe { DisconnectNamedPipe(h) };
+        let _ = second_client.join();
+        assert_eq!(second, REAL_PATH, "上一条连接剩下的 904 字节串到了这一条");
+    }
+
+    const REAL_PATH: &[u8] = b"E:\\real\\path.pdf";
+
+    fn open_client(path: &str) -> std::fs::File {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("客户端连不上自己的测试管道")
+    }
+
+    /// 与 `pipe_loop` 同一条握手口径：客户端可能先连上，那时 `ConnectNamedPipe` 报
+    /// `ERROR_PIPE_CONNECTED` 也算成功
+    fn connect(_file: &mut std::fs::File, h: HANDLE) -> bool {
+        unsafe { ConnectNamedPipe(h, None) }.is_ok()
+            || unsafe { GetLastError() } == ERROR_PIPE_CONNECTED
     }
 }

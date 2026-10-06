@@ -36,13 +36,12 @@ mod network;
 mod render;
 #[cfg(windows)]
 mod settings;
-/// 系统媒体控制卡（音量面板那张卡）：把手机播放态投影过去，并把卡片按钮变回播放指令
-#[cfg(windows)]
-mod smtc;
 #[cfg(windows)]
 mod state;
 #[cfg(windows)]
 mod theme;
+#[cfg(windows)]
+mod toast;
 mod transfer;
 #[cfg(windows)]
 mod tray;
@@ -79,6 +78,10 @@ fn main() {
         .iter()
         .map(std::path::PathBuf::from)
         .find(|p| p.is_file());
+    let uri_arg = args
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .find(|a| a.starts_with(toast::SCHEME));
     // 开机自启动拉起的那一次只进托盘、不弹主窗口；参数名与写进注册表的那一份同源于 `autostart`
     let start_hidden = autostart::has_minimized_arg(
         &args
@@ -89,19 +92,52 @@ fn main() {
 
     // 单实例：已有实例在跑 → 把请求经命名管道转交过去，本进程立即退出
     if !ipc::acquire_single_instance() {
-        match file_arg {
-            Some(p) => {
+        // 转交成没成，在这条路上本来不留任何痕迹：本进程一秒钟就退，GUI 子系统里 stderr 没人看。
+        // 按持久化的 Debug 开关把日志挂上，真机报"点了卡片上的按钮没反应"时才有证可查
+        // （只记"哪一类请求、成没成"，绝不记 URI 本身——那里面是一次性口令）。
+        if settings::load().debug_enabled {
+            if let Some(dir) = identity::debug_log_dir() {
+                let _ = debuglog::enable(&dir);
+            }
+        }
+        let note = |kind: &str, ok: bool| {
+            debuglog::log!(
+                if ok {
+                    debuglog::Level::Info
+                } else {
+                    debuglog::Level::Warn
+                },
+                "ui",
+                "ipc.forward",
+                &[("kind", kind), ("ok", if ok { "1" } else { "0" })]
+            );
+        };
+        match (uri_arg, file_arg) {
+            // 第二实例只做转交：它没有令牌表，自己执行动作等于绕过了口令
+            (Some(uri), _) => {
+                let ok = ipc::forward_path(&uri);
+                note("card", ok);
+                if ok {
+                    say("[LinkX] 已把通知卡上的这次点击转交给运行中的实例");
+                } else {
+                    say("[LinkX] 运行中的实例未响应管道，这次点击作废");
+                }
+            }
+            (None, Some(p)) => {
                 let path = p.to_string_lossy().to_string();
-                if ipc::forward_path(&path) {
+                let ok = ipc::forward_path(&path);
+                note("file", ok);
+                if ok {
                     say(format!("[LinkX] 已把 {path} 转交给运行中的实例"));
                 } else {
                     say("[LinkX] 运行中的实例未响应管道，路径未转交");
                 }
             }
-            // 没有文件参数 = 用户又双击了一次图标。运行中的实例可能藏在托盘里，不出声地退出
-            // 会让用户以为双击没反应，所以请它把窗口摆回来；带 `--minimized` 的那次要求不显示
-            None => {
-                if start_hidden || ipc::request_show() {
+            // 又双击了一次图标：请运行中的实例把窗口摆回来，它可能正藏在托盘里；`--minimized` 那次不要求显示
+            (None, None) => {
+                let ok = start_hidden || ipc::request_show();
+                note("show", ok);
+                if ok {
                     say("[LinkX] 已有实例在运行，本进程退出");
                 } else {
                     say("[LinkX] 已有实例在运行，但未能通知它，本进程退出");
@@ -113,6 +149,7 @@ fn main() {
 
     // 上一轮遗留的拖拽载荷（没拖完就退出、或崩溃留下的全尺寸原图）开起来就清掉：产品口径是"关掉就没有缓存"
     transfer::sweep_album_drag_dir();
+    toast::register_identity();
 
     let hinst = window::get_instance();
     // 视觉走查预览态（LINKX_UI_PREVIEW）：仅渲染真实版式，不接 BLE worker。
@@ -145,6 +182,10 @@ fn main() {
         st.send_path_input = path.clone();
         st.send_file_req = true;
         say(format!("[LinkX] 启动参数文件已排队: {path}"));
+    }
+    // 点按钮时 LinkX 已经退出过：这一份全新状态里没有那张卡的令牌，如实按"过期"报给用户
+    if let Some(uri) = uri_arg {
+        toast::handle_activation(&shared, &uri);
     }
 
     tray::add_tray_icon(hwnd);
