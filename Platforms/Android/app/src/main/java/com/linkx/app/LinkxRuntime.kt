@@ -448,18 +448,6 @@ object LinkxRuntime {
         return r == 1
     }
 
-    /** 推送当前曲目封面（手机 → 电脑），true = 已入队。局域网未通时引擎拒收，返回 false。 */
-    @Synchronized
-    fun sendMediaCover(trackKey: String, jpeg: ByteArray, tsMs: Long): Boolean {
-        val h = handle
-        if (h == 0L) return false
-        val r = runCatching { NativeCore.nativeSendMediaCover(h, trackKey, jpeg, tsMs) }
-            .onFailure { Log.w(TAG, "nativeSendMediaCover 调用失败：${it.javaClass.simpleName} ${it.message}") }
-            .getOrDefault(0)
-        if (r == 1) pump()
-        return r == 1
-    }
-
     /**
      * 推送一条通知；`keyHash` 为通知稳定 key 哈希（0 = 无）。
      * 回复定位三元组（`tag` / `notificationId` / `canReply` + 那两个回复字段）随同一条消息上行：
@@ -1279,8 +1267,6 @@ object LinkxRuntime {
                 tcpBound = true
                 Log.i(TAG, "TCP 通道绑定完成")
                 sendLocalConfig() // TCP 绑定后再同步一次（此时大载荷走 TCP）
-                // 电脑可能刚刚重启或刚刚配对，它手上没有封面；不重发就要等下一首歌才有图
-                MediaControl.onLanUp()
             }
             is LinkxEvent.TcpUnbound -> {
                 tcpBound = false

@@ -1,7 +1,9 @@
 //! 系统媒体控制卡（SMTC）：把手机正在播放的东西投影到 Windows 自己的媒体界面
 //! （音量面板那张卡、锁屏、游戏栏），卡上的按钮再变回播放指令发给手机。
 //!
-//! 只做"投影"：卡片由系统绘制，本模块喂元数据 / 封面 / 进度并接按钮事件。按钮是系统固定的
+//! 只做"投影"：卡片由系统绘制，本模块喂元数据与进度并接按钮事件。**不投封面图** —— 未打包应用
+//! 能不能让系统跨进程读到缩略图，从来没有在真人眼前证实过一次，两轮真机都是空白，所以这条
+//! 链路整个撤掉了（手机不再压图上传，省每首歌几十 KB 与一块解码位图）。按钮是系统固定的
 //! 那几个，**没有自定义按钮、也没有音量按钮**，所以不把快进快退挪用成音量 —— 卡片画那个图标，
 //! 点下去就得干那件事。
 //!
@@ -18,9 +20,6 @@ use windows::Media::{
     SystemMediaTransportControlsButtonPressedEventArgs,
     SystemMediaTransportControlsTimelineProperties,
 };
-use windows::Storage::Streams::{
-    DataWriter, InMemoryRandomAccessStream, RandomAccessStreamReference,
-};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::WinRT::{ISystemMediaTransportControlsInterop, RoGetActivationFactory};
@@ -36,18 +35,12 @@ struct Update {
     playing: bool,
     pos_sec: i64,
     duration_sec: i64,
-    /// 当前这首歌的封面；`None` = 没有，此时要**显式清掉**卡片上的旧图
-    cover: Option<Vec<u8>>,
     published: String,
 }
 
 struct Card {
     controls: SystemMediaTransportControls,
     published: String,
-    /// 这条曲目（`published` 那把键）的封面是否已经交给过系统 —— 成败都算，换歌才再试
-    cover_done_for: Option<String>,
-    /// 已交给卡片的那条图片流：系统事后才去读，被回收就只剩空框
-    thumb: Option<InMemoryRandomAccessStream>,
     pos_sec: i64,
 }
 
@@ -60,9 +53,9 @@ thread_local! {
 /// 建不出来时多久再试一次（每 33 ms 撞一次只会刷满日志）
 const RETRY: Duration = Duration::from_secs(5);
 
-/// 按下按钮后卡片按"用户要的目标态"显示的最长时间；超过就回落到手机报回来的真状态，
-/// 宁可晚半拍，也不能一直显示一件根本没发生的事。
-pub(crate) const OPTIMISTIC_WINDOW: Duration = Duration::from_secs(3);
+/// 按下按钮后卡片按"用户要的目标态"显示的最长时间；超过就回落到手机报回来的真状态。
+/// 必须长过手机送回真状态的最坏路径（常规采样 3 秒一轮 + 指令后追采 1.5 秒，见 `MediaControl.SETTLE_DELAYS_MS`）。
+pub(crate) const OPTIMISTIC_WINDOW: Duration = Duration::from_secs(5);
 
 /// UI 定时器入口：有播放状态就投影，没有就把卡片撤下。
 ///
@@ -73,7 +66,7 @@ pub(crate) fn tick() {
     let Some(arc) = crate::window::shared_state() else {
         return;
     };
-    let update = take_update(&arc.lock().unwrap());
+    let update = take_update(&mut arc.lock().unwrap());
     match update {
         Some(u) => apply(&u),
         None => clear(),
@@ -82,18 +75,27 @@ pub(crate) fn tick() {
 
 /// 该不该投影、投影什么。判据用 `link_paired()`（此刻真的说得上话）而不是"曾经配对过"：
 /// 手机被强杀后引擎还会停在 Paired 几十秒，跟着 `media` 走就留下一张"正在播放"的僵尸卡。
-fn take_update(st: &UiState) -> Option<Update> {
+/// 卡片该显示"在放"还是"暂停"：手机上报的那个值，加上刚按下那条指令想要的那个值。
+/// 过期或已经对上的记账当场清掉 —— 留着它，用户直接在手机上按播放会被这条旧记录压住。
+/// 单独成函数是为了让这条判据能绕开"媒体模块开没开"那个进程级全局来测。
+fn effective_playing(st: &mut UiState) -> bool {
+    let reported = st.media.as_ref().is_some_and(|m| m.playing);
+    match st.media_cmd_want {
+        Some((want, at)) if at.elapsed() < OPTIMISTIC_WINDOW && reported != want => want,
+        Some(_) => {
+            st.media_cmd_want = None;
+            reported
+        }
+        None => reported,
+    }
+}
+
+fn take_update(st: &mut UiState) -> Option<Update> {
     if !st.link_paired() || !crate::features::enabled(crate::features::Module::MediaControl) {
         return None;
     }
+    let playing = effective_playing(st);
     let m = st.media.as_ref()?;
-    // 手机还没报回目标态时，先按用户按下的那个状态显示（超时自动回落，见 OPTIMISTIC_WINDOW）
-    let mut playing = m.playing;
-    if let Some((want, at)) = st.media_cmd_want {
-        if playing != want && at.elapsed() < OPTIMISTIC_WINDOW {
-            playing = want;
-        }
-    }
     Some(Update {
         hwnd_raw: st.hwnd_raw,
         title: m.title.clone(),
@@ -102,7 +104,6 @@ fn take_update(st: &UiState) -> Option<Update> {
         playing,
         pos_sec: m.position_ms / 1000,
         duration_sec: m.duration_ms / 1000,
-        cover: st.cover_of_current().map(|c| c.jpeg.clone()),
         published: format!(
             "{}|{}|{}",
             media_track_key(&m.package, &m.title, &m.artist),
@@ -137,14 +138,9 @@ fn apply(u: &Update) {
     });
 }
 
-/// 把这一轮的差异写进卡片。换歌、播放态翻转、封面迟到都触发整轮重建；只有进度在走时走轻路径。
+/// 把这一轮的差异写进卡片。换歌或播放态翻转才整轮重建；只有进度在走时走轻路径。
 fn run(card: &mut Card, u: &Update) {
-    // 封面是"迟到"的（播放状态先到、图片后到），所以图片到位要再刷一次；但同一条曲目只交一次，
-    // 成败都记账 —— 旧写法只在写成功时记账，一次写坏就让这张卡每 33ms 重敲一遍系统，
-    // 表现是"按下暂停的瞬间被刷回播放"
-    let cover_to_send =
-        u.cover.is_some() && card.cover_done_for.as_deref() != Some(u.published.as_str());
-    if card.published != u.published || cover_to_send {
+    if card.published != u.published {
         let _ = card.controls.SetIsEnabled(true);
         let _ = card.controls.SetPlaybackStatus(if u.playing {
             MediaPlaybackStatus::Playing
@@ -158,33 +154,22 @@ fn run(card: &mut Card, u: &Update) {
                 let _ = mp.SetArtist(&HSTRING::from(u.artist.as_str()));
                 let _ = mp.SetAlbumTitle(&HSTRING::from(u.album.as_str()));
             }
-            let cover = match u.cover.as_ref().map(|jpeg| jpeg_stream(jpeg)) {
-                Some(Ok(stream)) => RandomAccessStreamReference::CreateFromStream(&stream)
-                    .and_then(|r| up.SetThumbnail(&r))
-                    .map(|_| card.thumb = Some(stream))
-                    .map_err(|e| e.to_string()),
-                Some(Err(e)) => Err(format!("内存流: {e}")),
-                // 没封面时清空：留着上一首的图，等于给新标题配错照片
-                None => {
-                    card.thumb = None;
-                    up.SetThumbnail(None::<&RandomAccessStreamReference>)
-                        .map_err(|e| e.to_string())
-                }
+            let note = match up.Update() {
+                Ok(()) => "ok".to_string(),
+                Err(e) => e.to_string(),
             };
-            let updated = up.Update().map_err(|e| e.to_string());
-            let bytes = u.cover.as_ref().map_or(0, |v| v.len());
-            let (level, note) = match (&cover, &updated) {
-                (Ok(()), Ok(())) => (debuglog::Level::Info, format!("{bytes}B")),
-                (Err(e), _) | (_, Err(e)) => (debuglog::Level::Warn, e.to_string()),
-            };
-            debuglog::log!(level, "ui", "smtc.cover", &[("note", &note)]);
+            debuglog::log!(
+                if note == "ok" {
+                    debuglog::Level::Info
+                } else {
+                    debuglog::Level::Warn
+                },
+                "ui",
+                "smtc.publish",
+                &[("note", &note)]
+            );
         }
         // 记账落在 DisplayUpdater 之外：连"拿不到更新器"这种失败也不该变成每帧重敲系统
-        card.cover_done_for = if u.cover.is_some() {
-            Some(u.published.clone())
-        } else {
-            None
-        };
         card.published.clone_from(&u.published);
     }
     if card.pos_sec != u.pos_sec {
@@ -221,8 +206,6 @@ pub(crate) fn clear() {
         if let Some(card) = slot.borrow_mut().as_mut() {
             let _ = card.controls.SetIsEnabled(false);
             card.published.clear();
-            card.cover_done_for = None;
-            card.thumb = None;
             card.pos_sec = -1;
         }
     });
@@ -301,22 +284,9 @@ fn build(hwnd_raw: isize) -> Option<Card> {
         Some(Card {
             controls,
             published: String::new(),
-            cover_done_for: None,
-            thumb: None,
             pos_sec: -1,
         })
     }
-}
-
-/// 把 JPEG 字节塞进一段内存流（`RandomAccessStreamReference` 要的就是这个）；本进程不解码。
-fn jpeg_stream(jpeg: &[u8]) -> windows::core::Result<InMemoryRandomAccessStream> {
-    let stream = InMemoryRandomAccessStream::new()?;
-    let writer = DataWriter::CreateDataWriter(&stream)?;
-    writer.WriteBytes(jpeg)?;
-    writer.StoreAsync()?.get()?;
-    writer.FlushAsync()?.get()?;
-    stream.Seek(0)?;
-    Ok(stream)
 }
 
 /// `MediaCommand.Action`（`Proto/linkx/v1/media.proto`）里卡片按钮用得上的几个值
@@ -368,9 +338,12 @@ mod tests {
         if !crate::features::enabled(crate::features::Module::MediaControl) {
             return;
         }
-        let live = state(true, state_code::PAIRED, 0);
-        assert!(take_update(&live).is_some(), "真连着且在放歌：该投影到卡片");
-        let u = take_update(&live).unwrap();
+        let mut live = state(true, state_code::PAIRED, 0);
+        assert!(
+            take_update(&mut live).is_some(),
+            "真连着且在放歌：该投影到卡片"
+        );
+        let u = take_update(&mut live).unwrap();
         assert_eq!(
             (u.title.as_str(), u.artist.as_str(), u.album.as_str()),
             ("虎口脱险", "老狼", "恋恋风尘")
@@ -383,13 +356,41 @@ mod tests {
             state(true, state_code::CLOSED, 0),
             state(true, state_code::PAIRED, 999_999),
         ] {
+            let mut dead = dead;
             assert!(
-                take_update(&dead).is_none(),
+                take_update(&mut dead).is_none(),
                 "链路不活着时不该继续投影（paired={} conn={} silent={}ms）",
                 dead.paired,
                 dead.conn_state,
                 dead.rx_silent_ms
             );
         }
+    }
+
+    /// 卡片上按下暂停后要**停在暂停**直到手机把真状态报回来：手机常规采样 3 秒一轮，中间必然
+    /// 有几轮旧上报到达，跟着它们重画就是真机报的"按下去半秒又跳回播放"。
+    #[test]
+    fn a_fresh_command_holds_the_card_until_the_phone_agrees() {
+        let mut st = state(true, state_code::PAIRED, 0);
+        st.media.as_mut().unwrap().playing = true;
+        st.media_cmd_want = Some((false, std::time::Instant::now()));
+        assert!(!effective_playing(&mut st), "刚按了暂停：卡片停在暂停");
+        assert!(
+            st.media_cmd_want.is_some(),
+            "窗口内不能提前松手，否则旧上报会顶上来"
+        );
+
+        st.media.as_mut().unwrap().playing = false;
+        assert!(!effective_playing(&mut st));
+        assert!(st.media_cmd_want.is_none(), "手机对上了就松手");
+
+        // 手机没执行（播放器不配合）：窗口过后回落到真状态。要**超出**窗口，压在边界上会偶发翻脸
+        st.media.as_mut().unwrap().playing = true;
+        st.media_cmd_want = Some((
+            false,
+            std::time::Instant::now() - OPTIMISTIC_WINDOW - Duration::from_secs(1),
+        ));
+        assert!(effective_playing(&mut st), "过期之后以手机上报为准");
+        assert!(st.media_cmd_want.is_none(), "过期即清，不留悬挂记录");
     }
 }
