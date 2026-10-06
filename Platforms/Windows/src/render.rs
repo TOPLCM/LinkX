@@ -1050,20 +1050,21 @@ fn close_prompt_rects(e: &Env) -> ClosePromptRects {
         bottom: card.top + e.px(dy) + e.px(h),
     };
     let bottom = card.bottom - e.px(20 + 22 + 14);
-    let mut right = card.right - e.px(24);
+    // 三颗按钮与标题、正文同侧左对齐：正文靠左而按钮靠右，一张卡上出现两套对齐（真机反馈）
+    let mut left = card.left + e.px(24);
     let mut mk = |w: i32| {
         let r = RECT {
-            left: right - e.px(w),
+            left,
             top: bottom - e.px(36),
-            right,
+            right: left + e.px(w),
             bottom,
         };
-        right = r.left - e.px(CLOSE_BTN_GAP);
+        left = r.right + e.px(CLOSE_BTN_GAP);
         r
     };
-    let minimize = mk(CLOSE_BTN_W[2]);
-    let exit = mk(CLOSE_BTN_W[1]);
     let cancel = mk(CLOSE_BTN_W[0]);
+    let exit = mk(CLOSE_BTN_W[1]);
+    let minimize = mk(CLOSE_BTN_W[2]);
     let remember = RECT {
         left: card.left + e.px(24),
         right: card.right - e.px(24),
@@ -2883,6 +2884,22 @@ fn paint_clipboard(hdc: HDC, e: &Env, st: &UiState, w: i32) {
         false,
         st.list_hover == Some((2, 0)),
     );
+    // 这颗按钮平时用不上（电脑复制会自动同步），所以就在它下面说清它是"没同步上时手动重发"
+    text_out(
+        hdc,
+        e,
+        Role::Small,
+        e.px(CONTENT_L),
+        e.px(CLIP_SEND_Y + CLIP_BTN_H + 8),
+        &truncate_px(
+            hdc,
+            e,
+            Role::Small,
+            "平时电脑复制的内容会自动同步；这个按钮用于没同步上时手动重发一次。",
+            right - e.px(CONTENT_L + 12),
+        ),
+        p.sub_text,
+    );
 
     let mut y = e.px(224);
     let body_w = right - e.px(CONTENT_L + 24); // 正文从 CONTENT_L+12 起画，右侧留 12
@@ -2916,7 +2933,7 @@ fn paint_clipboard(hdc: HDC, e: &Env, st: &UiState, w: i32) {
         Role::Small,
         e.px(CONTENT_L),
         y,
-        "电脑复制的文本会自动推给手机；手机端受 Android 10+ 限制，切回前台时补同步。",
+        "手机端受 Android 10+ 限制：手机复制的内容要切回前台时才补同步。",
         p.sub_text,
     );
 }
@@ -4168,6 +4185,18 @@ thread_local! {
 #[cfg(windows)]
 pub(crate) fn dib_bytes_total() -> usize {
     THUMB_DIBS.with(|c| c.borrow().iter().map(|e| dib_bytes(e.w, e.h)).sum())
+}
+
+/// 收进托盘时清空解码位图缓存（相册那一屏最多攒 8 MB 的 32bpp 位图）。
+/// 安全：缓存的键是 `id`，编码 JPEG 仍在 `UiState.album` 里，恢复后画到那一格会重新解码 ——
+/// 代价是每张几毫秒的一次解码，换掉的是"藏在托盘里还占着全屏两倍面积的位图"。
+#[cfg(windows)]
+pub(crate) fn purge_thumb_dibs() {
+    THUMB_DIBS.with(|c| {
+        for e in c.borrow_mut().drain(..) {
+            let _ = unsafe { DeleteObject(HGDIOBJ(e.bmp.0)) };
+        }
+    });
 }
 
 #[cfg(windows)]

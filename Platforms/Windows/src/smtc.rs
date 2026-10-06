@@ -44,7 +44,8 @@ struct Update {
 struct Card {
     controls: SystemMediaTransportControls,
     published: String,
-    has_cover: bool,
+    /// 这条曲目（`published` 那把键）的封面是否已经交给过系统 —— 成败都算，换歌才再试
+    cover_done_for: Option<String>,
     /// 已交给卡片的那条图片流：系统事后才去读，被回收就只剩空框
     thumb: Option<InMemoryRandomAccessStream>,
     pos_sec: i64,
@@ -59,6 +60,10 @@ thread_local! {
 /// 建不出来时多久再试一次（每 33 ms 撞一次只会刷满日志）
 const RETRY: Duration = Duration::from_secs(5);
 
+/// 按下按钮后卡片按"用户要的目标态"显示的最长时间；超过就回落到手机报回来的真状态，
+/// 宁可晚半拍，也不能一直显示一件根本没发生的事。
+pub(crate) const OPTIMISTIC_WINDOW: Duration = Duration::from_secs(3);
+
 /// UI 定时器入口：有播放状态就投影，没有就把卡片撤下。
 ///
 /// 锁纪律：先取名句再动手。写成 `match take_update(&arc.lock().unwrap()) { ... }` 会让这把锁
@@ -68,9 +73,6 @@ pub(crate) fn tick() {
     let Some(arc) = crate::window::shared_state() else {
         return;
     };
-    // 先取名句再动手：`match take_update(&arc.lock().unwrap()) { ... }` 会让这把锁一直活到
-    // 整个 match 结束，于是下面每个跨进程调用都压着全进程的状态锁（按钮回调、worker、调试面
-    // 全排在后面，还可能重入 `CARD` 的可变借用直接把进程 abort 掉）。
     let update = take_update(&arc.lock().unwrap());
     match update {
         Some(u) => apply(&u),
@@ -85,12 +87,19 @@ fn take_update(st: &UiState) -> Option<Update> {
         return None;
     }
     let m = st.media.as_ref()?;
+    // 手机还没报回目标态时，先按用户按下的那个状态显示（超时自动回落，见 OPTIMISTIC_WINDOW）
+    let mut playing = m.playing;
+    if let Some((want, at)) = st.media_cmd_want {
+        if playing != want && at.elapsed() < OPTIMISTIC_WINDOW {
+            playing = want;
+        }
+    }
     Some(Update {
         hwnd_raw: st.hwnd_raw,
         title: m.title.clone(),
         artist: m.artist.clone(),
         album: m.album.clone(),
-        playing: m.playing,
+        playing,
         pos_sec: m.position_ms / 1000,
         duration_sec: m.duration_ms / 1000,
         cover: st.cover_of_current().map(|c| c.jpeg.clone()),
@@ -98,7 +107,7 @@ fn take_update(st: &UiState) -> Option<Update> {
             "{}|{}|{}",
             media_track_key(&m.package, &m.title, &m.artist),
             m.album,
-            m.playing
+            playing
         ),
     })
 }
@@ -130,7 +139,12 @@ fn apply(u: &Update) {
 
 /// 把这一轮的差异写进卡片。换歌、播放态翻转、封面迟到都触发整轮重建；只有进度在走时走轻路径。
 fn run(card: &mut Card, u: &Update) {
-    if card.published != u.published || card.has_cover != u.cover.is_some() {
+    // 封面是"迟到"的（播放状态先到、图片后到），所以图片到位要再刷一次；但同一条曲目只交一次，
+    // 成败都记账 —— 旧写法只在写成功时记账，一次写坏就让这张卡每 33ms 重敲一遍系统，
+    // 表现是"按下暂停的瞬间被刷回播放"
+    let cover_to_send =
+        u.cover.is_some() && card.cover_done_for.as_deref() != Some(u.published.as_str());
+    if card.published != u.published || cover_to_send {
         let _ = card.controls.SetIsEnabled(true);
         let _ = card.controls.SetPlaybackStatus(if u.playing {
             MediaPlaybackStatus::Playing
@@ -164,12 +178,14 @@ fn run(card: &mut Card, u: &Update) {
                 (Err(e), _) | (_, Err(e)) => (debuglog::Level::Warn, e.to_string()),
             };
             debuglog::log!(level, "ui", "smtc.cover", &[("note", &note)]);
-            // 只在真写成功时记账，否则坏掉的封面要等下一首歌才有机会重试
-            if matches!(level, debuglog::Level::Info) {
-                card.published.clone_from(&u.published);
-                card.has_cover = u.cover.is_some();
-            }
         }
+        // 记账落在 DisplayUpdater 之外：连"拿不到更新器"这种失败也不该变成每帧重敲系统
+        card.cover_done_for = if u.cover.is_some() {
+            Some(u.published.clone())
+        } else {
+            None
+        };
+        card.published.clone_from(&u.published);
     }
     if card.pos_sec != u.pos_sec {
         write_timeline(&card.controls, u.pos_sec, u.duration_sec);
@@ -205,7 +221,7 @@ pub(crate) fn clear() {
         if let Some(card) = slot.borrow_mut().as_mut() {
             let _ = card.controls.SetIsEnabled(false);
             card.published.clear();
-            card.has_cover = false;
+            card.cover_done_for = None;
             card.thumb = None;
             card.pos_sec = -1;
         }
@@ -263,7 +279,20 @@ fn build(hwnd_raw: isize) -> Option<Card> {
                     _ => None,
                 };
                 if let Some(a) = action {
-                    sender.lock().unwrap().media_cmd_req = Some((a, 0, 0));
+                    let mut st = sender.lock().unwrap();
+                    // 播放/暂停/停止有明确目标态；上一首/下一首不改变"在不在放"，不动这条
+                    match a {
+                        act::PLAY => st.media_cmd_want = Some((true, Instant::now())),
+                        act::PAUSE | act::STOP => st.media_cmd_want = Some((false, Instant::now())),
+                        _ => {}
+                    }
+                    st.media_cmd_req = Some((a, 0, 0));
+                    debuglog::log!(
+                        debuglog::Level::Info,
+                        "ui",
+                        "smtc.button",
+                        &[("action", &a.to_string())]
+                    );
                 }
                 Ok(())
             },
@@ -272,7 +301,7 @@ fn build(hwnd_raw: isize) -> Option<Card> {
         Some(Card {
             controls,
             published: String::new(),
-            has_cover: false,
+            cover_done_for: None,
             thumb: None,
             pos_sec: -1,
         })
