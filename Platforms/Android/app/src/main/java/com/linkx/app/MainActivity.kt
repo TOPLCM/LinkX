@@ -1334,6 +1334,16 @@ private fun MediaPage(refresh: Int) {
                 )
             }
         }
+        // 指令的真实结果要看得见：submitCommand 当场只能说"排没排上"，播放器给不给这个能力
+        // 是执行那一刻才知道的，而它丢了也不回执。这里下一拍把原因摆出来。
+        val cmd = MediaControl.lastCommand
+        if (cmd.isNotEmpty()) {
+            Text(
+                "上一次指令：$cmd",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.tertiary,
+            )
+        }
         Text(
             "LinkX 只同步状态与控制指令，不搬运音频；这里点的动作与电脑上的按钮走同一条通道。",
             style = MaterialTheme.typography.bodySmall,

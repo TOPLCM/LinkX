@@ -133,7 +133,7 @@ object NativeCore {
         tsMs: Long,
     ): Int
 
-        /** 手机设备状态（电量/充电态）上报。1 = 已入队（未配对时为 0，下一轮重试）。 */
+    /** 手机设备状态（电量/充电态）上报。1 = 已入队（未配对时为 0，下一轮重试）。 */
     @JvmStatic external fun nativeSendDeviceStatus(
         handle: Long,
         battery: Int,
