@@ -139,16 +139,25 @@ def ws_mb():
     return s.get("mem_working_set_mb", 0.0)
 
 
-def make_pc_file(size):
-    p = os.path.join(OUT, f"pc-{size}.bin")
-    if not os.path.exists(p) or os.path.getsize(p) != size:
-        with open(p, "wb") as f:
+def make_pc_file(size, tag=""):
+    """每轮的文件名要不一样：界面那条任务行是**按名字原地更新**的，同名重发时它留在原位。
+    名字复用 + 只导出画面那几行 = 第二轮起这条掉出窗口，判据于是把"已经成了"读成 TIMEOUT。
+    内容还是同一份（硬链接，不占第二份磁盘）。"""
+    base = os.path.join(OUT, f"pc-{size}.bin")
+    if not os.path.exists(base) or os.path.getsize(base) != size:
+        with open(base, "wb") as f:
             written = 0
             block = bytes((i * 7 + 13) & 0xFF for i in range(65536))
             while written < size:
                 n = min(len(block), size - written)
                 f.write(block[:n])
                 written += n
+    if not tag:
+        return base
+    p = os.path.join(OUT, f"pc-{size}{tag}.bin")
+    if os.path.lexists(p):
+        os.remove(p)
+    os.link(base, p)  # 同目录硬链接；链接不上就该响，别悄悄退回复用同名把判据弄回瞎的
     return p
 
 
@@ -280,7 +289,7 @@ def main():
 
         # --- 电脑 → 手机 ---
         for size in PC_SIZES:
-            p = make_pc_file(size)
+            p = make_pc_file(size, f"-r{r}")
             name = os.path.basename(p)
             # 发送槽位一次只容一条：上一轮的行还挂在途时，这一轮的请求会被
             # "已有文件正在传输"直接拒掉，界面上连行都不新增——等待方于是读到 TIMEOUT，
