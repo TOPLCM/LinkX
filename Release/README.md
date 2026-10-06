@@ -31,8 +31,8 @@ Release/                          （除 Archive 里的 .sha256 之外，下面�
 
 | 平台 | 文件 | 大小 (bytes) | SHA-256 |
 |---|---|---|---|
-| Windows | `LinkX-0.5.1-x64.msi` | 634,880 | `d6aa797c023b7b2afdfc0d64b8e7de4d7d2145dc979f405b9671936b57822b60` |
-| Android | `LinkX-0.5.1-release.apk` | 2,403,614 | `6844f7458e1871e7ea69e74d590903d9eb918e52dba93f4e9bd5876cec1fd5f4` |
+| Windows | `LinkX-0.5.1-x64.msi` | 634,880 | `03e0405b4ec7c9edd9e1b1de80e21bbe82f9d7be375df42e6b6c4c95eb7df3c8` |
+| Android | `LinkX-0.5.1-release.apk` | 2,399,518 | `eade77a4da8016b71dbfd0c49dd8a2e18bacb1de21807ce59ccd234a096a3ae5` |
 
 这一版手机端没有新增可见功能，但**加密核心（会话密钥派生）改在共享的 Rust 层**，
 所以两端必须同批升级：只升一端会在第一条加密消息上解密失败、配对停在未完成。
