@@ -3,27 +3,15 @@
 //! 状态机语义：Queued(空态等待) / Running(加载中) / Paused(可恢复错误，可续传)
 //! / Verifying(收端整文件校验) / Done(成功) / Failed(不可恢复错误) / Cancelled(用户取消)。
 //!
-//! 分层：平台层负责所有文件 IO——发送侧按 `next_chunk_range()` 读文件，接收侧按
-//! `RecvAction::Write{offset,data}` 落盘（SAF 随机写或临时分片）。
-
-use debuglog::Level;
-use linkx_protocol::linkx::FileMeta;
+//! 分层：平台层负责所有文件 IO——发送侧自己按 `chunk_size` 读块，收端自己落盘
+//! （SAF 随机写或临时分片），本模块只管任务记账与整文件摘要。
 
 use crate::chunk::{chunk_range, chunks_total, crc32, FileHasher, CHUNK_SIZE};
 use crate::protocol;
 use crate::TransferError;
+use debuglog::Level;
 
 pub type FileId = u64;
-
-/// 单块 CRC 校验失败的最大重传次数：超限 → `Failed`，
-/// 防止恶意/损坏对端以「永远校验失败」触发无限重传（放大 / 死循环）。
-pub const MAX_CRC_RETRIES: u32 = 5;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransferDirection {
-    Send,
-    Recv,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferState {
@@ -44,24 +32,6 @@ impl TransferState {
 
     pub fn is_resumable(self) -> bool {
         self == Self::Paused
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct TransferProgress {
-    pub bytes_done: u64,
-    pub total_bytes: u64,
-    pub chunks_done: u32,
-    pub chunks_total: u32,
-}
-
-impl TransferProgress {
-    /// 0..=100（空文件直接 100）
-    pub fn percent(&self) -> u8 {
-        if self.total_bytes == 0 {
-            return 100;
-        }
-        ((self.bytes_done.min(self.total_bytes) * 100) / self.total_bytes) as u8
     }
 }
 
@@ -147,28 +117,6 @@ impl SendTask {
         chunks_total(self.size, self.chunk_size)
     }
 
-    /// FILE_META body（0x30）：流式口径下摘要留空（长度 0），收端改从 FILE_DONE 取
-    pub fn meta_body(&self) -> Vec<u8> {
-        let (sha, crc) = match self.declared {
-            Some((s, c)) => (s.to_vec(), c),
-            None => (Vec::new(), 0),
-        };
-        protocol::encode_meta(&FileMeta {
-            name: self.name.clone(),
-            size: self.size,
-            file_id: self.file_id,
-            chunk_size: self.chunk_size as u32,
-            sha256: sha.into(),
-            crc32: crc,
-            album_id: 0,
-        })
-    }
-
-    /// 已喂进摘要的字节数（= 覆盖进度，用于断言「首块发出前没读过整个文件」）
-    pub fn digest_bytes(&self) -> u64 {
-        self.digest.bytes()
-    }
-
     /// 续传时尚未补进摘要的前缀字节数
     pub fn prefix_pending(&self) -> u64 {
         self.prefix_pending
@@ -182,10 +130,6 @@ impl SendTask {
         if !self.state.is_terminal() {
             self.state = TransferState::Paused;
         }
-    }
-
-    pub fn next_index(&self) -> u32 {
-        self.next_index
     }
 
     /// 下一块在文件中的字节区间（平台层据此读文件）；已发完 → None
@@ -340,15 +284,6 @@ impl SendTask {
         self.state = TransferState::Cancelled;
         protocol::encode_done_cancelled(self.file_id, Some(reason))
     }
-
-    pub fn progress(&self) -> TransferProgress {
-        TransferProgress {
-            bytes_done: self.bytes_sent,
-            total_bytes: self.size,
-            chunks_done: self.next_index,
-            chunks_total: self.chunks_total(),
-        }
-    }
 }
 #[cfg(test)]
 mod tests {
@@ -406,25 +341,6 @@ mod tests {
         ));
         sender.pause();
         assert!(sender.state.is_resumable());
-    }
-
-    #[test]
-    fn progress_percent_edges() {
-        assert_eq!(TransferProgress::default().percent(), 100); // 空文件
-        let p = TransferProgress {
-            bytes_done: 1,
-            total_bytes: 3,
-            chunks_done: 0,
-            chunks_total: 1,
-        };
-        assert_eq!(p.percent(), 33);
-        let over = TransferProgress {
-            bytes_done: 999,
-            total_bytes: 100,
-            chunks_done: 0,
-            chunks_total: 1,
-        };
-        assert_eq!(over.percent(), 100); // 钳制
     }
 
     #[test]
