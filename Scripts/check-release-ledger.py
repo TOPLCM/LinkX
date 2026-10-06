@@ -26,7 +26,13 @@ bad = 0
 listed = {plat: set() for plat in base}
 for plat, name, _size, _digest in rows:
     listed[plat].add(name)
+skipped = []
 for plat, d in base.items():
+    if not os.path.isdir(d):
+        # 克隆里没有二进制（`Release/Windows/*`、`Release/Android/*` 都不入库），盘上比对无从做起。
+        # 报"跳过"而不是抛 FileNotFoundError：崩掉的门禁读起来像"产物坏了"，而它什么都没比。
+        skipped.append(plat)
+        continue
     on_disk = {f for f in os.listdir(d) if not f.endswith(('.sha256', '.idsig'))}
     for label, diff in (('盘上有未登记的产物', on_disk - listed[plat]),
                         ('登记了盘上不存在的文件', listed[plat] - on_disk)):
@@ -45,5 +51,13 @@ for plat, name, size, digest in rows:
     if not ok:
         print('     登记 %s / %s\n     盘上 %s / %d' % (digest[:16], size, real[:16], len(raw)))
         bad += 1
-print('台账与盘上一致' if bad == 0 else '有 %d 条不一致' % bad)
+if skipped:
+    print('  ⓘ 本机没有这些产物目录，盘上比对跳过：%s（这一项在出包机上跑）' % '、'.join(skipped))
+if bad:
+    print('有 %d 条不一致' % bad)
+elif len(skipped) == len(base):
+    # 什么都没比：只核了表格自身能解析，别说成"一致"
+    print('只核了台账表格本身（本机没有产物，未比对盘上文件）')
+else:
+    print('台账与盘上一致')
 sys.exit(1 if bad else 0)
