@@ -15,10 +15,10 @@ use windows::Win32::Graphics::Gdi::{
 };
 
 use crate::icons_svg::{
-    ALBUM_PATHS, BATTERY_PATHS, BELL_PATHS, BLOCKS_PATHS, CLIPBOARD_PATHS, COPY_PATHS,
-    DOWNLOAD_PATHS, FOLDER_PATHS, INFO_PATHS, LINK_PATHS, MEDIA_PATHS, MUSIC_PATHS, NEXT_PATHS,
-    PAUSE_PATHS, PHONE_PATHS, PLAY_PATHS, PREV_PATHS, SEND_PATHS, SETTINGS_PATHS, UPLOAD_PATHS,
-    VOL_DOWN_PATHS, VOL_UP_PATHS,
+    ALBUM_PATHS, BATTERY_PATHS, BELL_PATHS, BLOCKS_PATHS, CLIPBOARD_PATHS, DOWNLOAD_PATHS,
+    FOLDER_PATHS, INFO_PATHS, LINK_PATHS, MEDIA_PATHS, MUSIC_PATHS, NEXT_PATHS, PAUSE_PATHS,
+    PHONE_PATHS, PLAY_PATHS, PREV_PATHS, SEND_PATHS, SETTINGS_PATHS, UPLOAD_PATHS, VOL_DOWN_PATHS,
+    VOL_UP_PATHS,
 };
 use crate::render::colorref;
 
@@ -40,7 +40,6 @@ pub(crate) enum Icon {
     Blocks,
     Settings,
     Phone,
-    Copy,
     /// 发送（导出到另一端）
     Send,
     /// 上行：本机 → 手机
@@ -64,7 +63,7 @@ pub(crate) enum Icon {
 
 /// 全部变体（只在断言里遍历用，故 `cfg(test)`；生产绘制一律由具体调用点指名）
 #[cfg(test)]
-pub(crate) const ALL: [Icon; 22] = [
+pub(crate) const ALL: [Icon; 21] = [
     Icon::Link,
     Icon::Bell,
     Icon::Clipboard,
@@ -73,7 +72,6 @@ pub(crate) const ALL: [Icon; 22] = [
     Icon::Blocks,
     Icon::Settings,
     Icon::Phone,
-    Icon::Copy,
     Icon::Send,
     Icon::Upload,
     Icon::Download,
@@ -100,7 +98,6 @@ fn paths_of(icon: Icon) -> &'static [&'static [(f32, f32)]] {
         Icon::Blocks => BLOCKS_PATHS,
         Icon::Settings => SETTINGS_PATHS,
         Icon::Phone => PHONE_PATHS,
-        Icon::Copy => COPY_PATHS,
         Icon::Send => SEND_PATHS,
         Icon::Upload => UPLOAD_PATHS,
         Icon::Download => DOWNLOAD_PATHS,

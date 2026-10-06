@@ -19,6 +19,11 @@ pub(crate) const MAX_NOTIFICATIONS: usize = 20;
 pub(crate) const MAX_FILE_TASKS: usize = 10;
 pub(crate) const MAX_ERRORS: usize = 3;
 pub(crate) const MAX_PENDING_TOASTS: usize = 4;
+/// toast 按钮令牌的有效窗口。卡会在通知中心里被翻出来点很久，但"过期即作废"比"永久可用"安全：
+/// 令牌是本机唯一能让另一个进程替用户按下「发送」的东西
+pub(crate) const TOAST_TOKEN_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+/// 同时在途的令牌上限。只增不减的话，一整天不重启就会让这张表单向膨胀
+pub(crate) const MAX_TOAST_TOKENS: usize = 32;
 pub(crate) const COPIED_HINT_TTL: std::time::Duration = std::time::Duration::from_millis(1600);
 pub(crate) const MAX_INPUT_CHARS: usize = 400;
 
@@ -413,6 +418,36 @@ pub(crate) struct NotificationItem {
     pub reply_result_key: String,
 }
 
+/// 一张等着弹的系统通知卡。`copy`/`reply` 有值才画对应那颗按钮
+#[derive(Debug, Clone)]
+pub(crate) struct ToastCard {
+    pub title: String,
+    pub body: String,
+    /// 从这条通知里抽出来的验证码（没有就 None，按钮也不出现）
+    pub copy: Option<String>,
+    /// 这条通知能在手机上回复时，回话要落到的那条通知
+    pub reply: Option<ReplyTarget>,
+}
+
+impl ToastCard {
+    /// 纯文本的一条系统消息（不带按钮），设置变更、导出完成那些用它
+    pub(crate) fn plain(title: impl Into<String>, body: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            body: body.into(),
+            copy: None,
+            reply: None,
+        }
+    }
+}
+
+/// 一张卡上某颗按钮按下后要执行的动作，凭一次性令牌换回来
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ToastTarget {
+    CopyCode(String),
+    Reply(ReplyTarget),
+}
+
 /// 一条待回复通知的定位（与 `NotificationItem` 的同名字段同源，单独成结构是为了让
 /// "点哪一行 → 输入 → 发送 → 回执对上哪一行"这条链只带一份键，不各算一遍）
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -616,7 +651,10 @@ pub(crate) struct UiState {
     /// 询问弹窗里「记住我的选择，不再询问」的勾选
     pub close_remember: bool,
     pub errors: Vec<ErrorRow>,
-    pub pending_toasts: Vec<(String, String)>,
+    pub pending_toasts: Vec<ToastCard>,
+    /// 已发放的 toast 按钮令牌 → 动作与发放时刻。**故意不公开**：命中一次即作废是这张表唯一的
+    /// 安全属性，留个能直接读的口子就等于给了绕过它的写法
+    toast_tokens: HashMap<u64, (ToastTarget, Instant)>,
     /// 界面可见状态的**变化序号**：worker 每轮末尾比对，变了才 `post_state_changed`。
     /// 文件进度写进 `file_tasks` 时不产生任何 Windows 消息，而重绘闸门只看动画/输入焦点 ——
     /// 进度条就一直停在旧值，直到用户点一下窗口才跳，看着像"和安卓端不同步"
@@ -652,10 +690,6 @@ pub(crate) struct UiState {
     // ---- 媒体控制 / 手机状态（worker 写状态，UI 写命令）----
     pub media: Option<MediaView>,
     pub media_cmd_req: Option<(i32, i32, i64)>,
-    /// 卡片按钮按下去时用户要的**目标态**（true=播放）+ 按下时刻。系统媒体卡先按它显示，
-    /// 最多 `smtc::OPTIMISTIC_WINDOW` 后回落到手机真正报回来的状态：没有这条，按下暂停会被
-    /// 下一次状态刷新瞬间刷回播放（真机反馈）。
-    pub media_cmd_want: Option<(bool, std::time::Instant)>,
 
     pub battery: Option<BatteryView>,
 
@@ -668,11 +702,6 @@ pub(crate) struct BatteryView {
     pub charging: bool,
     /// 手机侧产生该读数的时刻（epoch 毫秒）：状态帧走 BLE 还是 TCP 没有顺序保证，只认最新全靠它
     pub at_ms: i64,
-}
-
-/// 一首歌的身份证：包名 + 曲名 + 艺术家。系统媒体卡用它判"还是不是刚才那一首"。
-pub(crate) fn media_track_key(pkg: &str, title: &str, artist: &str) -> String {
-    format!("{pkg}|{title}|{artist}")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -741,6 +770,7 @@ impl Default for UiState {
             close_remember: false,
             errors: Vec::new(),
             pending_toasts: Vec::new(),
+            toast_tokens: HashMap::new(),
             ui_rev: 0,
             copied_at: None,
             connect_req: None,
@@ -764,7 +794,6 @@ impl Default for UiState {
             input_focus: FOCUS_NONE,
             media: None,
             media_cmd_req: None,
-            media_cmd_want: None,
             battery: None,
             album: AlbumView {
                 per_page: ALBUM_PER_PAGE,
@@ -849,6 +878,16 @@ impl UiState {
             self.device_seen.retain(|a, _| live.contains(a));
         }
         dropped
+    }
+
+    /// 这条是不是"正在回复的那一条"。列表按 key 合并、按时间插到最前，所以只能按三元组认，
+    /// 不能记行号
+    pub(crate) fn is_reply_target(&self, item: &NotificationItem) -> bool {
+        self.reply_target.as_ref().is_some_and(|t| {
+            t.package == item.package
+                && t.tag == item.tag
+                && t.notification_id == item.notification_id
+        })
     }
 
     /// 记录一条通知：`key_hash` 非 0 且同应用视为**同一条通知的更新**（聊天类应用反复推同 key，
@@ -966,10 +1005,46 @@ impl UiState {
     }
 
     pub(crate) fn push_toast(&mut self, title: String, text: String) {
+        self.push_toast_card(ToastCard::plain(title, text));
+    }
+
+    pub(crate) fn push_toast_card(&mut self, card: ToastCard) {
         if self.pending_toasts.len() >= MAX_PENDING_TOASTS {
             self.pending_toasts.remove(0);
         }
-        self.pending_toasts.push((title, text));
+        self.pending_toasts.push(card);
+    }
+
+    /// 发一颗按钮令牌：顺带清掉过期的，容量仍满就丢最老的一颗。
+    /// 令牌只在卡片真的弹出去之前发放（见 `toast::show_now`），排队被丢弃的卡片不留可用口令
+    pub(crate) fn issue_toast_token(&mut self, token: u64, target: ToastTarget, now: Instant) {
+        self.toast_tokens
+            .retain(|_, (_, at)| now.duration_since(*at) < TOAST_TOKEN_TTL);
+        if self.toast_tokens.len() >= MAX_TOAST_TOKENS {
+            let oldest = self
+                .toast_tokens
+                .iter()
+                .min_by_key(|(_, (_, at))| *at)
+                .map(|(token, _)| *token);
+            if let Some(oldest) = oldest {
+                self.toast_tokens.remove(&oldest);
+            }
+        }
+        self.toast_tokens.insert(token, (target, now));
+    }
+
+    /// 按钮按下：令牌命中且没过期才换回动作，**取走即失效**——同一个令牌重放第二次
+    /// （通知中心里连点两下、或别的进程抓到再发一遍）只会执行一次
+    pub(crate) fn take_toast_token(&mut self, token: u64, now: Instant) -> Option<ToastTarget> {
+        let (target, at) = self.toast_tokens.remove(&token)?;
+        (now.duration_since(at) < TOAST_TOKEN_TTL).then_some(target)
+    }
+
+    /// 卡片没能弹出去 → 收回刚发的令牌。留着就是"屏幕上没有这张卡，却有能执行动作的口令"
+    pub(crate) fn revoke_toast_tokens(&mut self, tokens: impl IntoIterator<Item = u64>) {
+        for token in tokens {
+            self.toast_tokens.remove(&token);
+        }
     }
 
     pub(crate) fn focused_input_mut(&mut self) -> Option<&mut String> {
@@ -1045,6 +1120,21 @@ impl UiState {
                 changed = true;
             }
         }
+        // 那条卡片可能还挂在通知中心里（用户没点开过），口令就得跟着这条通知一起作废：
+        // 留着它，用户下一次点上的是一句"这条通知已经不在了"
+        let stale: Vec<u64> = self
+            .toast_tokens
+            .iter()
+            .filter(|(_, (target, _))| {
+                matches!(target, ToastTarget::Reply(t)
+                    if hit(&t.package, &t.tag, t.notification_id))
+            })
+            .map(|(token, _)| *token)
+            .collect();
+        if !stale.is_empty() {
+            self.revoke_toast_tokens(stale);
+            changed = true;
+        }
         if self
             .reply_target
             .as_ref()
@@ -1058,6 +1148,12 @@ impl UiState {
         }
         changed
     }
+}
+
+/// 一颗一次性按钮令牌。用系统 CSPRNG 而不是自增序号：它不是"随便猜也没关系"的 id，
+/// 而是本机唯一能证明"这颗按钮真被人在我们的卡上按过"的凭据
+pub(crate) fn random_token() -> u64 {
+    u64::from_le_bytes(linkx_crypto::random_bytes::<8>())
 }
 
 pub(crate) fn new_shared() -> SharedState {
@@ -1127,6 +1223,11 @@ pub(crate) fn preview_shared() -> Option<SharedState> {
                 .to_string(),
             ts_ms: 1_790_000_000_000,
             key_hash: 0x51AB_0001, // 同 key 的后续推送应就地合并
+            // 挂了回复入口但**没有验证码**：回复条上只该有输入框与发送，不给空按钮
+            tag: "chat".to_string(),
+            notification_id: 12,
+            can_reply: true,
+            reply_result_key: "reply".to_string(),
             ..Default::default()
         },
         NotificationItem {
@@ -1143,6 +1244,18 @@ pub(crate) fn preview_shared() -> Option<SharedState> {
             text: "[linkx] PR 已合并".to_string(),
             ts_ms: 1_789_999_880_000,
             key_hash: 0,
+            ..Default::default()
+        },
+        NotificationItem {
+            package: "com.android.mms".to_string(),
+            title: "106822134003430".to_string(),
+            text: "【火山引擎】验证码： 771362 。您正在进行身份验证，需要进行验证码校验（10分钟内有效），请勿向任何人提供此验证码。".to_string(),
+            ts_ms: 1_789_999_860_000,
+            key_hash: 0,
+            tag: "sms-code".to_string(),
+            notification_id: 91,
+            can_reply: true,
+            reply_result_key: "reply".to_string(),
             ..Default::default()
         },
         NotificationItem {
@@ -1327,6 +1440,123 @@ mod tests {
         assert_eq!(st.notifications.len(), 1);
         assert!(st.notifications[0].can_reply);
         assert_eq!(st.notifications[0].notification_id, 42);
+    }
+
+    /// 正在回复的那条靠三元组认，不靠行号：列表按 key 就地合并、新通知又插在最前，行号一直在变。
+    /// 认错了等于把这句回复发到别的通知上
+    #[test]
+    fn the_reply_target_is_recognised_by_its_triple() {
+        let mut st = UiState::default();
+        st.push_notification(NotificationItem {
+            package: "com.android.mms".into(),
+            title: "10690018".into(),
+            text: "【火山引擎】验证码： 771362 。您正在进行身份验证，请勿向任何人提供此验证码。"
+                .into(),
+            tag: "sms".into(),
+            notification_id: 7,
+            can_reply: true,
+            ..Default::default()
+        });
+        st.reply_target = Some(ReplyTarget {
+            package: "com.android.mms".into(),
+            tag: "sms".into(),
+            notification_id: 7,
+            action_index: 0,
+            result_key: String::new(),
+        });
+        assert!(
+            st.notifications.iter().any(|n| st.is_reply_target(n)),
+            "三元组该认出正在回复的那条"
+        );
+        st.reply_target.as_mut().unwrap().notification_id = 8;
+        assert!(
+            !st.notifications.iter().any(|n| st.is_reply_target(n)),
+            "换个 id 就不是它了：不许靠行号或包名糊认"
+        );
+    }
+
+    /// 通知消失了，卡上那颗「回复这条」的口令要一起作废：卡片还挂在通知中心里，
+    /// 留着口令就是等用户点出一次"这条通知已经不在了"。别的条不该被牵连。
+    #[test]
+    fn a_dismissed_notification_takes_its_card_button_with_it() {
+        use std::time::Instant;
+        let now = Instant::now();
+        let mut st = UiState::default();
+        let reply = |n: i32| {
+            ToastTarget::Reply(ReplyTarget {
+                package: "com.android.mms".into(),
+                tag: "sms-code".into(),
+                notification_id: n,
+                action_index: 0,
+                result_key: "reply".into(),
+            })
+        };
+        st.issue_toast_token(0x2a, reply(91), now);
+        st.issue_toast_token(0x2b, reply(92), now);
+        st.issue_toast_token(0x2c, ToastTarget::CopyCode("1234".into()), now);
+
+        assert!(
+            st.mark_notification_gone("com.android.mms", "sms-code", 91),
+            "口令被收回也算一次改动"
+        );
+        assert!(
+            st.take_toast_token(0x2a, now).is_none(),
+            "这条通知没了，它那颗回复口令不该还能用"
+        );
+        assert!(
+            st.take_toast_token(0x2b, now).is_some(),
+            "另一条通知的回复口令照旧"
+        );
+        assert!(
+            st.take_toast_token(0x2c, now).is_some(),
+            "复制口令与回复无关，不该被牵连"
+        );
+    }
+
+    /// 一次性令牌的四条底线：用过即废、超时作废、没发过的换不到、满了只丢最老的一颗。
+    /// 这张表是本机唯一能证明"通知卡上那颗按钮真被按过"的东西，任何一条松掉都等于
+    /// 让别的进程可以替用户发回复
+    #[test]
+    fn toast_tokens_are_single_use_timed_and_bounded() {
+        use std::time::Duration;
+        let now = Instant::now();
+        let mut st = UiState::default();
+        let copy = |n: u64| ToastTarget::CopyCode(n.to_string());
+
+        st.issue_toast_token(7, copy(7), now);
+        assert_eq!(st.take_toast_token(7, now), Some(copy(7)));
+        assert_eq!(
+            st.take_toast_token(7, now),
+            None,
+            "同一个口令第二次不该再管用"
+        );
+        assert_eq!(st.take_toast_token(99, now), None, "没发过的口令换不到动作");
+
+        st.issue_toast_token(8, copy(8), now);
+        assert_eq!(
+            st.take_toast_token(8, now + TOAST_TOKEN_TTL),
+            None,
+            "到点作废"
+        );
+        st.issue_toast_token(9, copy(9), now);
+        let almost = now + TOAST_TOKEN_TTL - Duration::from_millis(1);
+        assert!(st.take_toast_token(9, almost).is_some(), "差一毫秒还没作废");
+
+        st.issue_toast_token(10, copy(10), now);
+        st.revoke_toast_tokens([10]);
+        assert_eq!(
+            st.take_toast_token(10, now),
+            None,
+            "卡没弹出去时口令要当场收回"
+        );
+
+        for i in 0..MAX_TOAST_TOKENS as u64 {
+            st.issue_toast_token(100 + i, copy(100 + i), now + Duration::from_millis(i));
+        }
+        st.issue_toast_token(200, copy(200), now + Duration::from_millis(500));
+        assert_eq!(st.take_toast_token(100, now), None, "满了只丢最老的一颗");
+        assert!(st.take_toast_token(101, now).is_some(), "其余的照旧可用");
+        assert!(st.take_toast_token(200, now).is_some());
     }
 
     #[test]
