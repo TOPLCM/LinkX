@@ -28,7 +28,7 @@ use linkx_protocol::frame::{assemble_frame, flags, parse_full_frame, FrameHeader
 use linkx_protocol::pb::{
     AlbumFullRequest, AlbumItem, AlbumList, AlbumListRequest, AlbumThumb, AlbumThumbRequest,
     ClipboardPush, ConfigSync, DeviceStatus, FileCancel, FileChunk, FileDone, FileMeta,
-    MediaCommand, MediaCover, MediaState, NotificationDismiss, NotificationPush, NotificationReply,
+    MediaCommand, MediaState, NotificationDismiss, NotificationPush, NotificationReply,
     NotificationReplyAck,
 };
 use linkx_protocol::tlv_codec::{self, Tlv};
@@ -322,7 +322,6 @@ pub enum EngineEvent {
     },
     /// 对端（手机）当前曲目的封面。**只可能经局域网到达**（纯蓝牙时手机端就不发），
     /// `track_key` 原样带回，收端据此确认"这张图属于现在这首歌"，不靠到达顺序猜。
-    MediaCover { track_key: String, jpeg: Vec<u8> },
     /// 对端（电脑）下发的播放控制指令，由平台层执行。
     MediaCommand {
         /// `media_command::Action` 的值（0=PLAY_PAUSE … 8=SET_VOLUME）
@@ -2089,7 +2088,6 @@ impl SessionEngine {
             msg_type::CLIPBOARD_PUSH => self.on_clipboard_push(&plaintext),
             msg_type::MEDIA_STATE => self.on_media_state(&plaintext),
             msg_type::MEDIA_COMMAND => self.on_media_command(&plaintext),
-            msg_type::MEDIA_COVER => self.on_media_cover(&plaintext),
             msg_type::DEVICE_STATUS => self.on_device_status(&plaintext),
             msg_type::FILE_META => self.on_file_meta(&plaintext),
             msg_type::FILE_CHUNK => self.on_file_chunk(&plaintext),
@@ -2783,38 +2781,6 @@ impl SessionEngine {
         self.send_routed(msg_type::MEDIA_STATE, &s.encode_to_vec(), now_ms, false)
     }
 
-    /// 推送当前曲目的封面（手机 → 电脑）：**只在局域网已绑定时发，纯蓝牙时静默不发**。
-    ///
-    /// 与相册不同，这里不发出去不该报错：封面是锦上添花，蓝牙链路也能把"在放什么"送达到，
-    /// 只是送不动几十 KB 的图。为它弹一条"发送失败"会让用户以为功能坏了。
-    pub fn send_media_cover(&mut self, c: &MediaCover, now_ms: i64) -> bool {
-        if !self.is_paired() || !self.tcp_bound {
-            debuglog::log!(
-                Level::Info,
-                "session",
-                "media.cover.skip",
-                &[("tcp_bound", if self.tcp_bound { "1" } else { "0" })]
-            );
-            return false;
-        }
-        if c.jpeg.len() > linkx_protocol::MEDIA_COVER_MAX_JPEG {
-            // 手机侧自己就该压到 32 KB 以内；走到这里说明发端写错了，拒发并出声
-            self.emit_error(
-                err_code::IO_GENERIC,
-                format!(
-                    "封面超限：{} 字节，上限 {}，未发送",
-                    c.jpeg.len(),
-                    linkx_protocol::MEDIA_COVER_MAX_JPEG
-                ),
-            );
-            return false;
-        }
-        let msg_id = self.next_msg_id();
-        let src = self.local_dev_id();
-        let payload = envelope::encode(&msg_id, now_ms, &src, &c.encode_to_vec());
-        self.send_encrypted_tcp(msg_type::MEDIA_COVER, &payload)
-    }
-
     /// 下发播放控制指令（电脑 → 手机），由对端平台层执行。路由用 `send_routed` 而不是蓝牙
     /// 独占：**手机退到后台时最先没的就是这条 BLE 链路**（会换地址、会掐广播），局域网 socket
     /// 照常活着；钉在蓝牙上等于"只在 App 前台时可控制"。指令几十字节，不抢文件带宽。
@@ -2874,42 +2840,6 @@ impl SessionEngine {
                 volume: s.volume,
             }),
             Err(e) => self.emit_error(err_code::IO_GENERIC, format!("播放状态解析失败: {e}")),
-        }
-    }
-
-    /// 收到封面。超过上限就整条拒绝并报错：手机端自己压到 32 KB 以内，收到更大的只有两种
-    /// 解释——对端是别的版本，或有人在往这一帧里塞数据。两种都不该默默收下。
-    fn on_media_cover(&mut self, plaintext: &[u8]) {
-        if !self.is_paired() {
-            self.emit_error(err_code::IO_GENERIC, "尚未配对，封面未采纳");
-            return;
-        }
-        let env = match envelope::decode(plaintext) {
-            Ok(e) => e,
-            Err(e) => {
-                self.emit_error(err_code::IO_GENERIC, format!("封面信封解析失败: {e}"));
-                return;
-            }
-        };
-        match MediaCover::decode(env.body.as_ref()) {
-            Ok(c) if c.jpeg.len() > linkx_protocol::MEDIA_COVER_MAX_JPEG => self.emit_error(
-                err_code::IO_GENERIC,
-                format!(
-                    "封面超限：{} 字节，上限 {}，已丢弃",
-                    c.jpeg.len(),
-                    linkx_protocol::MEDIA_COVER_MAX_JPEG
-                ),
-            ),
-            // 键太长就不是键了：那是有人拿它当正文使，正文不该从这条通道进来
-            Ok(c) if c.track_key.len() > linkx_protocol::MEDIA_TRACK_KEY_MAX => self.emit_error(
-                err_code::IO_GENERIC,
-                format!("封面归属键超长：{} 字节，已丢弃", c.track_key.len()),
-            ),
-            Ok(c) => self.emit(EngineEvent::MediaCover {
-                track_key: c.track_key,
-                jpeg: c.jpeg.to_vec(),
-            }),
-            Err(e) => self.emit_error(err_code::IO_GENERIC, format!("封面解析失败: {e}")),
         }
     }
 
@@ -5564,77 +5494,6 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, EngineEvent::MediaState { .. })),
             "电脑侧应经 TCP 收到 MediaState"
-        );
-    }
-
-    /// 封面是媒体类里唯一有体积的一条，规矩有两条：**纯蓝牙不发**（发了也传不动，
-    /// 还会挤掉通知与剪贴板），**超限不发**（不能让对方用一帧撑爆内存）。
-    #[test]
-    fn media_cover_is_lan_only_and_size_capped() {
-        let t = now();
-        const TM: i64 = 1_790_000_000_000;
-        let cover = |n: usize| MediaCover {
-            track_key: "com.netease.cloudmusic|夜曲|周杰伦".into(),
-            jpeg: vec![0x5Au8; n].into(),
-        };
-
-        // 已配对、局域网未绑定：不发，也不往蓝牙队列里塞
-        let (mut win, mut and) = pair_engines(None, None);
-        win.start(t);
-        and.start(t);
-        pump(&mut win, &mut and, t, 64);
-        win.confirm_sas();
-        and.confirm_sas();
-        pump(&mut win, &mut and, t, 16);
-        assert!(win.is_paired() && and.is_paired());
-        assert!(!and.is_tcp_bound(), "这一步的前提是没绑局域网");
-        assert!(
-            !and.send_media_cover(&cover(1024), TM),
-            "纯蓝牙时封面不得发出"
-        );
-        assert!(and.take_outbound().is_empty(), "封面也不得降级走蓝牙队列");
-
-        // 绑定后：原样送达，key 与字节都对得上
-        let (mut win, mut and) = paired_and_bound();
-        let _ = drain_events(&mut win);
-        let _ = drain_events(&mut and);
-        assert!(and.send_media_cover(&cover(2048), TM), "已绑定时封面应发出");
-        let out = and.take_tcp_outbound();
-        assert!(
-            out.iter().any(|f| matches!(parse_full_frame(f), Ok((h, _))
-                if h.msg_type == msg_type::MEDIA_COVER)),
-            "封面应排进 TCP 队列"
-        );
-        for f in &out {
-            win.feed_tcp(f, t);
-        }
-        let got = drain_events(&mut win)
-            .into_iter()
-            .find_map(|e| match e {
-                EngineEvent::MediaCover { track_key, jpeg } => Some((track_key, jpeg)),
-                _ => None,
-            })
-            .expect("电脑侧应收到 MediaCover");
-        assert_eq!(got.0, "com.netease.cloudmusic|夜曲|周杰伦");
-        assert_eq!(got.1.len(), 2048);
-
-        // 超限：**发端就不发**（收端那道闸门对的是"对端是别的版本或在塞数据"，
-        // 构造一条合法加密的超限入站帧要绕过发送口，与剪贴板那条同判据，不重复造）
-        let _ = drain_events(&mut and);
-        assert!(
-            !and.send_media_cover(&cover(49 * 1024), TM),
-            "超限封面不得从本机发出"
-        );
-        assert!(
-            and.take_tcp_outbound().is_empty(),
-            "超限封面不得排进 TCP 队列"
-        );
-        assert!(
-            drain_events(&mut and).iter().any(|e| matches!(
-                e,
-                EngineEvent::Error { context, .. } if context.contains("封面超限")
-            )),
-            "拒发要留下可读的错误"
         );
     }
 

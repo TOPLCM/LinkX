@@ -133,15 +133,7 @@ object NativeCore {
         tsMs: Long,
     ): Int
 
-    /** 推送当前曲目封面（手机 → 电脑）。只在局域网通时发：没通时引擎直接拒收并返回 0，调用方不必自己判链路。 */
-    @JvmStatic external fun nativeSendMediaCover(
-        handle: Long,
-        trackKey: String,
-        jpeg: ByteArray,
-        tsMs: Long,
-    ): Int
-
-    /** 手机设备状态（电量/充电态）上报。1 = 已入队（未配对时为 0，下一轮重试）。 */
+        /** 手机设备状态（电量/充电态）上报。1 = 已入队（未配对时为 0，下一轮重试）。 */
     @JvmStatic external fun nativeSendDeviceStatus(
         handle: Long,
         battery: Int,

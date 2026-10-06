@@ -1,7 +1,6 @@
 package com.linkx.app
 
 import android.content.Context
-import android.graphics.Bitmap
 import android.media.AudioManager
 import android.media.MediaMetadata
 import android.media.session.MediaController
@@ -10,6 +9,7 @@ import android.media.session.PlaybackState
 import android.os.SystemClock
 import android.util.Log
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -42,20 +42,26 @@ object MediaControl {
     /** 排队中的指令上限：对端疯狂刷按钮时宁可明确丢弃，也不能把队列堆到无界。 */
     private const val MAX_PENDING_CMDS = 8
 
-    /** 封面边长与字节上限：压不进上限就当作"这首没封面"，不把窄口当文件通道用。 */
-    private const val COVER_MAX_PX = 200
-    private const val COVER_MAX_BYTES = 32 * 1024
+    /**
+     * 指令之后追采的节拍（毫秒）。安卓的 `MediaSession` 改播放状态是**异步**的：立刻采一次
+     * 经常还读到改之前那个值，于是电脑要等下一轮常规采样（最长 [POLL_MS]）才知道"其实已经
+     * 暂停了"，表现就是"按下去半秒又弹回播放"。采到真的变了就停；一次都没变就交回常规轮询，
+     * 播放器可能就是不执行，不能替它假报。
+     */
+    private val SETTLE_DELAYS_MS = longArrayOf(150, 400, 900)
+
 
     private val busy = AtomicBoolean(false)
     private val pendingCmds = AtomicInteger(0)
     private val pool by lazy {
-        Executors.newSingleThreadExecutor { r -> Thread(r, "linkx-media").apply { isDaemon = true } }
+        Executors.newSingleThreadScheduledExecutor { r ->
+            Thread(r, "linkx-media").apply { isDaemon = true }
+        }
     }
 
     private var lastAt = 0L
     private var lastPushAt = 0L
     private var lastSignature = ""
-    private var coverSentKey = ""
 
     /** 最近一次成功推出去的内容（控制面与 UI 据此判断"到底有没有在采样"）。 */
     @Volatile
@@ -120,9 +126,12 @@ object MediaControl {
         val app = ctx.applicationContext
         pool.execute {
             try {
+                val before = snapshot(app)?.sig ?: ""
                 lastCommand = handleCommand(app, action, volume, deltaMs)
-                // 执行完立刻补采：电脑显示手机上报值（不自己记账）。音量同步生效必带新值；切歌异步可能仍采旧态——不假报，交下一轮。
+                // 执行完立刻补采（音量这类生效即有新值的），再按节拍追采：播放态与切歌是异步落地的，
+                // 一次采不到就会把"已经按了"拖到下一轮常规采样才让电脑知道
                 runCatching { sampleAndPush(app, SystemClock.elapsedRealtime()) }
+                settleAfter(app, before, 0)
             } catch (e: Exception) {
                 lastCommand = "执行异常：${e.message}"
                 Log.w(TAG, "指令执行失败：${e.message}")
@@ -133,8 +142,24 @@ object MediaControl {
         return "已排队：动作 $action"
     }
 
-    private fun sampleAndPush(ctx: Context, nowMs: Long) {
-        val (controller, state) = pickController(ctx) ?: run { current = null; return }
+    /** 指令后追采：状态真的变了就收工；一次都没变就交回常规轮询（播放器可能就是不执行，不替它假报）。 */
+    private fun settleAfter(app: Context, before: String, attempt: Int) {
+        if (attempt >= SETTLE_DELAYS_MS.size) return
+        pool.schedule({
+            val now = SystemClock.elapsedRealtime()
+            val after = runCatching { sampleAndPush(app, now) }.getOrDefault(before)
+            // 追采也算一次采样，别让常规 tick 紧接着再采一遍
+            lastAt = now
+            if (after == before) settleAfter(app, before, attempt + 1)
+        }, SETTLE_DELAYS_MS[attempt], TimeUnit.MILLISECONDS)
+    }
+
+    /** 一次采样的材料：签名（判"变没变"）+ 要推出去的字段 + 原始元数据（封面从这里取）。 */
+    private data class Snap(val sig: String, val p: Playback, val speedX100: Int)
+
+    /** 读一遍本机媒体会话并算出签名。**不推送、不动任何"上次"记账**，所以指令前后各调一次是安全的。 */
+    private fun snapshot(ctx: Context): Snap? {
+        val (controller, state) = pickController(ctx) ?: return null
         val md = controller.metadata
         val title = md?.getString(MediaMetadata.METADATA_KEY_TITLE).orEmpty()
         val artist = md?.getString(MediaMetadata.METADATA_KEY_ARTIST).orEmpty()
@@ -146,96 +171,55 @@ object MediaControl {
         val speed = state?.let { if (it.playbackSpeed > 0f) it.playbackSpeed else 1.0f } ?: 1.0f
         val volume = mediaVolumePercent(ctx)
         val pkg = controller.packageName.orEmpty()
-        current = Playback(pkg, title, artist, album, playing, position, duration, volume)
+        // 签名**必须含音量**：不含时电脑改了音量手机却判"未变化"不推。不含进度：进度每时每刻
+        // 都在变，含进去等于每轮都"变了"，窄口会被心跳自己挤满。
+        val sig = "$pkg|$title|$artist|$album|$playing|$duration|${(speed * 100).toInt()}|$volume"
+        return Snap(
+            sig,
+            Playback(pkg, title, artist, album, playing, position, duration, volume),
+            (speed * 100).toInt(),
+        )
+    }
 
+    /** 采一次并（内容变了或到了心跳）推给电脑，返回这一轮的签名；没有可采的会话时返回空串。 */
+    private fun sampleAndPush(ctx: Context, nowMs: Long): String {
+        val s = snapshot(ctx) ?: run { current = null; return "" }
+        val p = s.p
+        current = p
         // 只在"内容变了"或"到了进度心跳"时推：静止画面每 3 秒一条帧会把窄口占满。
-        // 签名**必须含音量**：不含时电脑改了音量手机却判"未变化"不推，连点几下算出的目标值还是同一个数。
-        val signature = "$pkg|$title|$artist|$album|$playing|$duration|${(speed * 100).toInt()}|$volume"
-        val changed = signature != lastSignature
+        val changed = s.sig != lastSignature
         // 心跳**不看 playing**：暂停态下一台刚重启的电脑会一直空白——手机不知道对面已是全新会话。
         val heartbeat = nowMs - lastPushAt >= POSITION_PUSH_MS
         if (!changed && !heartbeat) {
             lastSkip = "状态未变化（节流）"
-            return
+            return s.sig
         }
         // 签名**只能在真的推出去之后**才更新：提前更新会把"未配对时推送失败"记成已发，配对后电脑侧永远空白。
         val sent = LinkxRuntime.sendMediaState(
-            pkg = pkg,
-            title = title,
-            artist = artist,
-            album = album,
-            playing = playing,
-            positionMs = position,
-            durationMs = duration,
-            speedX100 = (speed * 100).toInt(),
-            volume = volume,
+            pkg = p.pkg,
+            title = p.title,
+            artist = p.artist,
+            album = p.album,
+            playing = p.playing,
+            positionMs = p.positionMs,
+            durationMs = p.durationMs,
+            speedX100 = s.speedX100,
+            volume = p.volume,
             // 协议时间戳用挂钟（对端判新旧、日志可读）；节流用 elapsedRealtime——用途不同，不能共用。
             tsMs = System.currentTimeMillis(),
         )
         if (sent) {
-            lastSignature = signature
+            lastSignature = s.sig
             lastPushAt = nowMs
-            lastSent = "$pkg|$title"
+            lastSent = "${p.pkg}|${p.title}"
             lastSkip = ""
-            // 状态先落地再补封面：电脑拿 track_key 认图，顺序反了就会把上一首的图配这一首的歌名
-            pushCover(pkg, title, artist, md)
         } else {
             // false 有两种成因：未配对，或 JNI 调用没成功（.so 缺符号）。措辞必须覆盖两者，否则排查被带偏。
             lastSkip = "推送被拒：未配对，或 native 调用失败（见 logcat nativeSendMediaState）"
         }
+        return s.sig
     }
 
-    /**
-     * 局域网刚通：清掉"这首已经交代过"的记号，下一轮采样就会把当前曲目的封面补发一次。
-     * 电脑重启或重新配对之后手上是没有封面的，不补就要等用户切歌。
-     */
-    fun onLanUp() {
-        coverSentKey = ""
-    }
-
-    /**
-     * 推当前曲目的封面。**只在局域网通时推**（纯蓝牙传几十 KB 会挤掉通知与剪贴板，引擎也会直接拒收），
-     * 同一首只推一次：`coverSentKey` 记的是"已经交代过的那首"，无论它当时有没有封面。
-     */
-    private fun pushCover(pkg: String, title: String, artist: String, md: MediaMetadata?) {
-        val key = "$pkg|$title|$artist"
-        if (key == coverSentKey || !LinkxRuntime.tcpBound) return
-        val bmp = md?.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
-            ?: md?.getBitmap(MediaMetadata.METADATA_KEY_ART)
-        val jpeg = bmp?.let { encodeCover(it) }
-        if (jpeg == null) {
-            // 这首就是没封面（或压不进上限）：记下来，别每轮重编一次
-            coverSentKey = key
-            return
-        }
-        if (LinkxRuntime.sendMediaCover(key, jpeg, System.currentTimeMillis())) {
-            Log.i(TAG, "cover.sent ${bmp.width}x${bmp.height} ${jpeg.size}B")
-            coverSentKey = key
-        }
-    }
-
-    /** 缩到 [COVER_MAX_PX] 边长以内再压 JPEG，质量逐级降直到不超过 [COVER_MAX_BYTES]。 */
-    private fun encodeCover(src: Bitmap): ByteArray? {
-        val side = maxOf(src.width, src.height)
-        val scaled = if (side <= COVER_MAX_PX) src else {
-            val k = COVER_MAX_PX.toFloat() / side
-            Bitmap.createScaledBitmap(src, (src.width * k).toInt().coerceAtLeast(1),
-                (src.height * k).toInt().coerceAtLeast(1), true)
-        }
-        // 缩放出来那张是 native 内存（一首 1000×1000 的图 ≈ 4 MB），不回收就得等 GC 才肯放手
-        val recycled = scaled !== src
-        try {
-            val out = java.io.ByteArrayOutputStream(COVER_MAX_BYTES)
-            for (q in intArrayOf(80, 60, 40)) {
-                out.reset()
-                scaled.compress(Bitmap.CompressFormat.JPEG, q, out)
-                if (out.size() <= COVER_MAX_BYTES) return out.toByteArray()
-            }
-            return if (out.size() <= COVER_MAX_BYTES) out.toByteArray() else null
-        } finally {
-            if (recycled) scaled.recycle()
-        }
-    }
 
 
     /** 目标应用没实现某个动作时，安卓是**静默忽略**的：先查 `PlaybackState.actions` 能力位，

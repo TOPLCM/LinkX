@@ -30,10 +30,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     PostQuitMessage, RegisterClassW, SetCursor, SetForegroundWindow, ShowWindow, CS_HREDRAW,
     CS_VREDRAW, HICON, IDC_ARROW, IDC_HAND, IDI_APPLICATION, MINMAXINFO, SHOW_WINDOW_CMD, SW_HIDE,
     SW_RESTORE, SW_SHOW, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLIPBOARDUPDATE, WM_CLOSE,
-    WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN,
-    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT,
-    WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER, WNDCLASSW,
-    WS_OVERLAPPEDWINDOW,
+    WM_CONTEXTMENU, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_ERASEBKGND, WM_GETMINMAXINFO,
+    WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_NULL, WM_PAINT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED,
+    WM_TIMER, WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
 
 use crate::autostart;
@@ -1460,6 +1460,52 @@ fn bring_to_front(hwnd: HWND) {
     set_memory_priority(false);
 }
 
+/// 托盘右键菜单里「关闭」那一项的命令号
+const TRAY_MENU_CLOSE: usize = 0x1001;
+
+/// 托盘右键菜单：一项「关闭」，左键本来就能唤回窗口所以不放"打开"。这是选了最小化之后唯一
+/// 一条能关掉程序的短路径。`request_exit` 走 `WM_APP_EXIT` → `DefWindowProc(WM_CLOSE)`，
+/// 绕开关窗行为判定，不会被拦回去；`TPM_RETURNCMD` 直接返回命令号，不必再加 `WM_COMMAND`。
+fn show_tray_menu(hwnd: HWND) {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, TrackPopupMenu, MF_STRING,
+        TPM_RETURNCMD,
+    };
+    let menu = match unsafe { CreatePopupMenu() } {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    let label: Vec<u16> = "关闭".encode_utf16().chain(std::iter::once(0)).collect();
+    let mut pt = POINT::default();
+    let cmd = unsafe {
+        if AppendMenuW(
+            menu,
+            MF_STRING,
+            TRAY_MENU_CLOSE,
+            windows::core::PCWSTR(label.as_ptr()),
+        )
+        .is_err()
+        {
+            let _ = DestroyMenu(menu);
+            return;
+        }
+        // 不设前台窗口，菜单不会在点击别处时自动消失（Win32 的已知行为）
+        let _ = SetForegroundWindow(hwnd);
+        if GetCursorPos(&mut pt).is_err() {
+            pt = POINT::default();
+        }
+        let r = TrackPopupMenu(menu, TPM_RETURNCMD, pt.x, pt.y, 0, hwnd, None);
+        // 不补这一条，菜单可能一直挂在屏幕上
+        let _ = PostMessageW(hwnd, WM_NULL, WPARAM(0), LPARAM(0));
+        let _ = DestroyMenu(menu);
+        r.0
+    };
+    if cmd as usize == TRAY_MENU_CLOSE {
+        request_exit(hwnd);
+    }
+}
+
 extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_PAINT => {
@@ -1670,18 +1716,18 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
             LRESULT(0)
         }
         // 托盘图标回调。以前只注册不接：图标亮着，点它没任何反应，最小化之后只能去任务栏找。
-        // 事件码看协议版本：`tray.rs` 下发的是 v4，选中上报 `NIN_SELECT`/`NIN_KEYSELECT`；
-        // 只有 SETVERSION 没成功的旧 shell 才回落到鼠标消息。两套都接，漏一套就是"在某些机器
-        // 上点了没反应"这种查起来最费时间的形态。
+        // 事件码取 `LOWORD(lParam)`：v4 协议下 `NIN_SELECT`/`NIN_KEYSELECT` 与鼠标消息（`WM_LBUTTONUP`
+        // 那一套）**都**从这里上报，`HIWORD` 是图标 ID。漏一套就是"某些机器上点了没反应"。
         crate::tray::CALLBACK => {
-            if matches!(
-                (lparam.0 as u32) & 0xFFFF,
-                NIN_SELECT | NIN_KEYSELECT | WM_LBUTTONUP | WM_LBUTTONDBLCLK
-            ) {
-                // 藏在托盘里的窗口是被 `SW_HIDE` 藏掉的（`--minimized` 拉起的那一次、选了
-                // 「最小化到托盘」的那一次），对它 `SW_RESTORE` 不顶事；真最小化过才需要还原。
-                // 判错就是"图标亮着、点它没反应"。最小化时释放过的后备缓冲由 `WM_PAINT` 重建
-                bring_to_front(hwnd);
+            match (lparam.0 as u32) & 0xFFFF {
+                WM_RBUTTONUP | WM_CONTEXTMENU => show_tray_menu(hwnd),
+                NIN_SELECT | NIN_KEYSELECT | WM_LBUTTONUP | WM_LBUTTONDBLCLK => {
+                    // 藏在托盘里的窗口是被 `SW_HIDE` 藏掉的（`--minimized` 拉起的那一次、选了
+                    // 「最小化到托盘」的那一次），对它 `SW_RESTORE` 不顶事；真最小化过才需要还原。
+                    // 判错就是"图标亮着、点它没反应"。最小化时释放过的后备缓冲由 `WM_PAINT` 重建
+                    bring_to_front(hwnd);
+                }
+                _ => {}
             }
             LRESULT(0)
         }
@@ -1829,6 +1875,11 @@ mod tests {
         assert_eq!(WM_DPICHANGED, 0x02E0);
         assert_eq!(WM_SETTINGCHANGE, 0x001A);
         assert_eq!(WM_THEMECHANGED, 0x031A);
+        // 托盘右键：这两个值分发不到就是"右键永远弹不出菜单"，而它不会报任何错
+        assert_eq!(WM_RBUTTONUP, 0x0205);
+        assert_eq!(WM_CONTEXTMENU, 0x007B);
+        assert_ne!(WM_RBUTTONUP & 0xFFFF, NIN_SELECT);
+        assert_ne!(WM_CONTEXTMENU & 0xFFFF, NIN_SELECT);
         // 最小化状态一律用 IsIconic 问窗口本身，不比对 WM_SIZE 的 wparam
         //（SIZE_RESTORED=0 / SIZE_MINIMIZED=1 / SIZE_MAXIMIZED=2，记错一位就变成"最大化拆缓冲、最小化不做事"）
         assert_eq!(WM_ERASEBKGND, 0x0014);
