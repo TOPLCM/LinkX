@@ -1,4 +1,4 @@
-# LinkX monorepo workspace 根（结构与职责划分见 开发过程文档（不随本仓库发布） 与 DIRECTORY.md）
+# LinkX monorepo workspace 根（结构与职责划分见 DIRECTORY.md）
 [workspace]
 resolver = "2"
 members = [

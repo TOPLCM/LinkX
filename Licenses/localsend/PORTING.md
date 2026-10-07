@@ -70,6 +70,11 @@ LocalSend 上游 `webrtc` feature 会引入 `webrtc` / DTLS 相关依赖（含 `
 彻底删除 webrtc 源码、依赖与 feature。
 ## 0.4.0 收尾：真正接进生产链路的是"文件名规则"
 
+> 以下是当时的处置，**其中两处现已失效**（见开头「现状」）：
+> `ls-interop` 这个 feature 与整个 vendored 目录都在 0.5.0 删掉了，
+> `cargo build --features ls-interop` 跑不通，`[lints.rust] dead_code = allow` 也没有宿主了。
+> 留着是因为文件名规则的移植与差异说明仍然有效，且这段解释了为什么义务还在而代码没了。
+
 - `ls-interop`（HTTP 互操作层）从默认 feature 降级为**显式开启**
   （`Crates/transfer/Cargo.toml`）：全仓搜索确认它没有任何生产调用点，
   却把 hyper / reqwest / rustls / tokio 整套异步栈编进交付二进制。
