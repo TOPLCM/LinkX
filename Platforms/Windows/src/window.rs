@@ -28,12 +28,12 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, IsIconic, LoadCursorW, LoadIconW, PostMessageW,
     PostQuitMessage, RegisterClassW, SetCursor, SetForegroundWindow, ShowWindow, CS_HREDRAW,
-    CS_VREDRAW, HICON, IDC_ARROW, IDC_HAND, IDI_APPLICATION, MINMAXINFO, SHOW_WINDOW_CMD, SW_HIDE,
-    SW_RESTORE, SW_SHOW, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLIPBOARDUPDATE, WM_CLOSE,
+    CS_VREDRAW, HICON, IDC_ARROW, IDC_HAND, IDI_APPLICATION, MINMAXINFO, SC_CLOSE, SHOW_WINDOW_CMD,
+    SW_HIDE, SW_RESTORE, SW_SHOW, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLIPBOARDUPDATE, WM_CLOSE,
     WM_CONTEXTMENU, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_ERASEBKGND, WM_GETMINMAXINFO,
     WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_NULL, WM_PAINT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED,
-    WM_TIMER, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+    WM_NULL, WM_PAINT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_SYSCOMMAND,
+    WM_THEMECHANGED, WM_TIMER, WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
 
 use crate::autostart;
@@ -56,8 +56,11 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 /// 系统升到 v4 之后可能改上报这一套码而不是鼠标消息，所以回调分支里 `NIN_*` 与 `WM_*` **两套都判**。
 const NIN_KEYSELECT: u32 = NIN_SELECT + 1;
 
-/// 编译期锁定关键 Win32 常量值：取字面量的常量必须有值断言
+/// 取字面量的 Win32 常量必须有值断言
 const _: () = {
+    assert!(WM_SYSCOMMAND == 0x0112);
+    assert!(SC_CLOSE == 0xF060);
+    assert!(WM_CLOSE == 0x0010);
     assert!(WM_MOUSELEAVE == 0x02A3);
     assert!(WM_MOUSELEAVE != 0x0216, "0x0216 并非 WM_MOUSELEAVE");
     assert!(WM_APP == 0x8000);
@@ -71,7 +74,7 @@ const _: () = {
     assert!(WM_KEYDOWN == 0x0100);
     assert!(VK_BACK.0 == 0x08);
     assert!(VK_ESCAPE.0 == 0x1B, "Esc 的虚拟键码写错就关不掉询问弹窗");
-    // 相册拖出：按下/抬起/移动靠这两个值判定，写错就是"点一下就拖走"或"拖不动也选不中"，且不会报错
+    // 相册拖出靠这两个值判定，写错不报错
     assert!(WM_LBUTTONUP == 0x0202);
     assert!(WM_LBUTTONDOWN == 0x0201);
     // 托盘回调按这些值分发；写错就是"图标亮着、点它没反应"，且不会有任何报错
@@ -154,11 +157,10 @@ pub(crate) fn post_state_changed(hwnd_raw: isize) {
     }
 }
 
-/// 退出：`WM_APP_EXIT` → `DefWindowProc(WM_CLOSE)` → `WM_DESTROY` → `PostQuitMessage`，
-/// 与点标题栏 ✕ 后答"退出程序"走到的是同一个终点，`main` 的收尾（摘托盘、释放双缓冲、
-/// 销毁窗口）一样都不会少 —— 直接 `process::exit` 会在托盘上留一个死图标。
-/// 走私有消息而不是 `WM_CLOSE`：`WM_CLOSE` 现在归"关闭按钮行为"分派，重启这种"已经答过了"
-/// 的关窗如果再被拦一次，用户按了「重新启动」却什么也不会发生。
+/// 退出：`WM_APP_EXIT` → `DefWindowProc(WM_CLOSE)` → `WM_DESTROY` → `PostQuitMessage`，与用户
+/// 答"退出程序"走的是同一个终点，`main` 的收尾（摘托盘、释放双缓冲、销毁窗口）一样都不会少
+/// —— 直接 `process::exit` 会在托盘上留一个死图标。不复用裸 `WM_CLOSE`：那一条现在的含义是
+/// "外部（安装程序经 Restart Manager）请进程结束"，两套语义搅在一起会互相顶掉。
 pub(crate) fn request_exit(hwnd: HWND) {
     if hwnd.0.is_null() {
         return;
@@ -168,14 +170,13 @@ pub(crate) fn request_exit(hwnd: HWND) {
     }
 }
 
-/// 供非 UI 线程（调试控制面）请求退出：跨线程只传 `isize`，不在别的线程上持有 `HWND`
+/// 供非 UI 线程请求退出：跨线程只传 `isize`，不在别的线程上持有 `HWND`
 #[allow(dead_code)] // 唯一调用方在 agent-debug 控制面，交付构建不带该 feature
 pub(crate) fn request_exit_from_raw(hwnd_raw: isize) {
     request_exit(HWND(hwnd_raw as *mut c_void));
 }
 
-/// 请求把窗口摆回前台。管道线程（第二实例双击图标、或「发送到 LinkX」）只传 `isize`，
-/// 不在别的线程上持有 `HWND`
+/// 请求把窗口摆回前台。管道线程只传 `isize`，不在别的线程上持有 `HWND`
 pub(crate) fn request_show_from_raw(hwnd_raw: isize) {
     let hwnd = HWND(hwnd_raw as *mut c_void);
     if hwnd.0.is_null() {
@@ -1466,9 +1467,18 @@ fn bring_to_front(hwnd: HWND) {
 /// 托盘右键菜单里「关闭」那一项的命令号
 const TRAY_MENU_CLOSE: usize = 0x1001;
 
+/// `wparam` 低 4 位是选中方式（鼠标/菜单），判命令号必须掩掉，否则一部分真实点击会漏
+const SC_CODE_MASK: usize = 0xFFF0;
+
+/// 用户按 ✕ 走 `WM_SYSCOMMAND`/`SC_CLOSE`（Alt+F4 同路），裸 `WM_CLOSE` 是外部（安装程序经
+/// Restart Manager）请进程结束 —— 对后者问一句等于把卸载停在半路等一个没人看的弹窗。
+fn is_user_close(msg: u32, wparam: usize) -> bool {
+    msg == WM_SYSCOMMAND && (wparam & SC_CODE_MASK) == SC_CLOSE as usize
+}
+
 /// 托盘右键菜单：一项「关闭」，左键本来就能唤回窗口所以不放"打开"。这是选了最小化之后唯一
-/// 一条能关掉程序的短路径。`request_exit` 走 `WM_APP_EXIT` → `DefWindowProc(WM_CLOSE)`，
-/// 绕开关窗行为判定，不会被拦回去；`TPM_RETURNCMD` 直接返回命令号，不必再加 `WM_COMMAND`。
+/// 一条能关掉程序的短路径；`request_exit` 绕开关窗行为判定不会被拦回去，`TPM_RETURNCMD`
+/// 直接返回命令号，不必再加 `WM_COMMAND`。
 fn show_tray_menu(hwnd: HWND) {
     use windows::Win32::Foundation::POINT;
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -1770,9 +1780,8 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
             }
             LRESULT(0)
         }
-        WM_CLOSE => {
-            // 点关闭按钮（含 Alt+F4）按用户选的「关闭按钮行为」走。重启确认弹窗开着时这里
-            // 直接吞掉：两个模态叠在一起，谁都不认得这颗 ✕
+        WM_SYSCOMMAND if is_user_close(msg, wparam.0) => {
+            // 重启确认弹窗开着时直接吞掉：两个模态叠在一起，谁都不认得这颗 ✕
             let Some(arc) = shared_state() else {
                 return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
             };
@@ -1803,9 +1812,14 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 // 取消：窗口原地不动
                 CloseAction::Stay => LRESULT(0),
                 // 退出交给默认处理：WM_DESTROY → PostQuitMessage，`main` 的收尾一样不少
-                CloseAction::Exit => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+                CloseAction::Exit => {
+                    let _ = unsafe { DefWindowProcW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0)) };
+                    LRESULT(0)
+                }
             }
         }
+        // 外部（安装程序 / Restart Manager）请退出：一声不响地收尾
+        WM_CLOSE => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
         // 已经答过一次（弹窗里选了退出）或功能改动要重启：不再询问，直接走默认收尾
         WM_APP_EXIT => {
             let _ = unsafe { DefWindowProcW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0)) };
@@ -1875,6 +1889,19 @@ fn set_memory_priority(low: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn close_request_separates_user_from_installer() {
+        assert!(is_user_close(WM_SYSCOMMAND, SC_CLOSE as usize));
+        // 鼠标点的那一条低位带选中信息
+        assert!(is_user_close(WM_SYSCOMMAND, SC_CLOSE as usize | 0x0001));
+        assert!(is_user_close(WM_SYSCOMMAND, SC_CLOSE as usize | 0x0002));
+        assert!(!is_user_close(WM_SYSCOMMAND, 0xF020));
+        assert!(!is_user_close(WM_SYSCOMMAND, 0xF030));
+        // 安装程序发的是裸 WM_CLOSE：不能走"问一句"
+        assert!(!is_user_close(WM_CLOSE, 0));
+        assert_eq!(SC_CODE_MASK, 0xFFF0);
+    }
 
     /// 字面量 Win32 常量的值断言：取字面量就必须锁住值，防止再次写错
     #[test]
