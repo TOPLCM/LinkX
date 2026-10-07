@@ -14,6 +14,11 @@ bash Scripts/build-mingw-windows.sh        # → Target/x86_64-pc-windows-gnu/re
 bash Scripts/build-msi-windows.sh
 ```
 
+**Windows 宿主上的 WiX 路线还要有一个 Util 扩展**：安装器在卸载/升级前先结束正在运行的程序，用的是
+`util:CloseApplication`，它只存在于 `WixToolset.Util.wixext` 里。构建脚本优先用本机已有的那份扩展，
+没有时 WiX 会从 NuGet 取一次（因此这一步需要联网，取到后缓存在本机用户目录）。
+Linux 宿主的 wixl 链路没有这个扩展，打出来的包不带这道保护。
+
 **为什么必须是 `x86_64-pc-windows-gnu`**：`build.rs` 只在 windows-gnu 下调用 `windres`
 编图标资源；msvc 目标那一步被跳过，产出的 exe 没有图标（资源管理器、任务栏、卸载面板
 全是默认图标）。直接 `cargo build --release` 得到的就是这份没图标的产物 —— 别拿它交付。
