@@ -9,6 +9,7 @@
 #   bash Scripts/check-release-clean.sh                      # 默认查 Windows release exe
 #   bash Scripts/check-release-clean.sh path/to/linkx.exe    # 查指定 exe
 #   bash Scripts/check-release-clean.sh --apk-so path/to.apk # 解出 APK 里的 .so 与 dex 再查
+#   LINKX_MUST_SYMBOL=… LINKX_MUST_SYMBOL_DEX=… 同上          # 复核历史产物时换成那一版该有的符号
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -83,6 +84,11 @@ feature_gate() {
   fi
 }
 
+# 反向断言用的"这一版该有的符号"。默认按当前交付构建；**复核历史归档产物时要能换**：
+# 媒体指令是 0.4.0 才有的，拿它去断言 0.1.0~0.3.0 的 APK 只会得到一条假的红。
+MUST_SO="${LINKX_MUST_SYMBOL:-Java_com_linkx_app_NativeCore_nativeSendMediaState}"
+MUST_DEX="${LINKX_MUST_SYMBOL_DEX:-nativeSendMediaState}"
+
 if [ "${1:-}" = "--apk-so" ]; then
   APK="${2:-}"
   [ -n "$APK" ] || { echo "用法：$0 --apk-so <apk 路径>"; exit 1; }
@@ -93,7 +99,7 @@ if [ "${1:-}" = "--apk-so" ]; then
     echo "❌ $APK 里没有 lib/arm64-v8a/liblinkx_core.so"
     exit 1
   fi
-  scan "$TMP" 'Java_com_linkx_app_NativeCore_nativeSendMediaState' "APK 内 liblinkx_core.so（$APK）"
+  scan "$TMP" "$MUST_SO" "APK 内 liblinkx_core.so（$APK）"
   rm -f "$TMP"
   # .so 干净不代表 APK 干净：Kotlin 侧的 `external fun nativeDebug*` 声明还在 classes.dex 里。
   # 它们是 JNI 入口、proguard 必须 keep、R8 删不掉，所以这一层验的是"跑不跑得起来"：
@@ -101,7 +107,7 @@ if [ "${1:-}" = "--apk-so" ]; then
   # runCatching 兜住 UnsatisfiedLinkError），不要求 dex 连名字都不许出现。
   DEX="Temp/release-clean-classes.dex"
   if unzip -p "$APK" "classes.dex" > "$DEX" 2>/dev/null; then
-    scan "$DEX" 'nativeSendMediaState' "APK 内 classes.dex（$APK）" BAD_PATS_DEX[@]
+    scan "$DEX" "$MUST_DEX" "APK 内 classes.dex（$APK）" BAD_PATS_DEX[@]
     if grep -aq 'debugdAvailable = true' "$DEX"; then
       echo "  ✗ classes.dex 里有把调试面判为可用的赋值"
       fail=1
