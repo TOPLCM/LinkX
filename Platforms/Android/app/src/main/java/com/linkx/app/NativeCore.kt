@@ -183,9 +183,6 @@ object NativeCore {
 
     @JvmStatic external fun nativeSendClipboard(handle: Long, text: String): Int
 
-    /** 会话状态（0..7）；未初始化返回 -1。 */
-    @JvmStatic external fun nativeState(handle: Long): Int
-
     /**
      * 注入本链路协商到的 ATT MTU，出站分片长度随之改变。
      * 写死小 MTU（如 23）而真机协商值可达 **517** 时，一次设备身份交换要发几十片，
