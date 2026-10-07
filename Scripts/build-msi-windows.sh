@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Windows 安装包（.msi）构建 —— 交叉编译 + wixl 打包，不需要 Windows/Wine。
+# Windows 安装包（.msi）构建 —— 交叉编译 linkx.exe + 打 MSI。
+# Linux 宿主只能走 wixl（msitools）；Windows 宿主走 WiX Toolset，正式包由这条链路出。
 
-# 流程：环境检查 → 交叉编译 linkx.exe → 注入版本生成 .wxs → 打包 msi
-#       → 静态校验（msiinfo/msiextract 回环）→ 归档 <OUT_DIR> + SHA-256（未签名，附校验值）
+# 流程：环境检查 → 交叉编译 linkx.exe → 注入版本生成 .wxs → 打包 msi → 静态校验 → 归档
 # 产物：<OUT_DIR>/LinkX-<version>-x64.msi(.sha256)   （OUT_DIR 默认 Release/Windows）
 
 # 用法：bash Scripts/build-msi-windows.sh
@@ -12,12 +12,8 @@
 #   MSI_ENGINE=auto|wixl|wix      打包引擎（默认 auto，按宿主判定）
 #   WIX_V4_WXS=<file>             选 wix 引擎时的 WiX v4/v5 源文件
 
-# 为什么默认引擎是 wixl：WiX 在非 Windows 上产不出 MSI —— v4/v5/v6 的 `wix build`
-# 把任何 <Directory Name> 判成非相对路径（WIX0389），v6+ 还要求接受收费 EULA；
-# v3.14 的 candle 能在 mono 下编译，但 light 需要 Windows 的 msi.dll；wine 路线要 32 位
-# PE32(.NET)，而多数 Linux 内核没有 IA32 支持。msitools 的 wixl 是原生链路，故默认它；
-# MSI_ENGINE=wix 分支留给 Windows 宿主用完整 WiX Toolset 重做（提供 v4/v5 源即可）。
-# wixl 的能力缺口与规避办法见 Platforms/Windows/installers/LinkX.wxs 头部注释。
+# 为什么默认 wixl、WiX 在非 Windows 上卡在哪：见两个 .wxs 的头部注释；
+# MSI_ENGINE=wix 分支留给 Windows 宿主用完整 WiX Toolset 出正式包。
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -30,9 +26,8 @@ EXE="Target/x86_64-pc-windows-gnu/release/linkx.exe"
 die() { echo "❌ $*" >&2; exit 1; }
 
 echo "== 1) 环境检查 =="
-# 引擎按宿主自动判定：wixl / msiinfo / msiextract 属 msitools，是 Linux 专有；
-# WiX Toolset 反过来在非 Windows 上构建不了 MSI（见文件头）。
-# 若无条件要求 msitools 三件套，脚本在 Windows 宿主第一步就会失败。
+# wixl / msiinfo / msiextract 是 Linux 专有，WiX Toolset 反过来在非 Windows 上产不出 MSI：
+# 无条件要求 msitools 三件套，这个脚本在 Windows 宿主第一步就会失败。
 ON_WINDOWS=0
 case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*|Windows*) ON_WINDOWS=1 ;; esac
 if [ "$MSI_ENGINE" = "auto" ]; then
@@ -65,8 +60,7 @@ echo "== 3) 生成 .wxs（注入版本） =="
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 [ -n "$VERSION" ] || die "无法从 Cargo.toml 读取版本号"
 mkdir -p Target/msi
-# 两个引擎吃各自方言的源：wixl 源 = LinkX.wxs；WiX v4/v5 源 = LinkX-v4.wxs。
-# 方言不可混用：自定义向导只在 v4 源里是完整的，拿 wixl 源喂 wix 引擎会装回一个有缺陷的安装器。
+# 两个引擎吃各自方言的源，不可混用：自定义向导只在 v4 源里是完整的
 if [ "$MSI_ENGINE" = "wix" ]; then
   WXS_SRC="${WIX_V4_WXS:-Platforms/Windows/installers/LinkX-v4.wxs}"
   WXS_GEN="Target/msi/LinkX-v4.wxs"
@@ -85,7 +79,11 @@ case "$MSI_ENGINE" in
   wix)
     command -v wix >/dev/null || die "未找到 wix（dotnet tool install -g wix）"
     echo "  引擎 = WiX Toolset（构建已注入版本的 $WXS_GEN）"
-    wix build "$WXS_GEN" -arch x64 -o "$OUT"
+    # -ext 带 util 扩展（CloseApplication 只有它有）。优先指到本机磁盘上那份（Tools/Wix/ 是安装副本，
+    # 不入库）：只写包名时 WiX 会去 NuGet 现取现装进 ~/.wix/extensions，出包这一步就悄悄依赖网络。
+    UTIL_EXT="$(ls Tools/Wix/extensions/WixToolset.Util.wixext/*/wixext5/WixToolset.Util.wixext.dll 2>/dev/null | head -1)"
+    [ -n "$UTIL_EXT" ] || UTIL_EXT=WixToolset.Util.wixext
+    wix build "$WXS_GEN" -arch x64 -ext "$UTIL_EXT" -o "$OUT"
     ;;
   wixl)
     echo "  引擎 = wixl（msitools；Linux 原生链路）"
@@ -98,13 +96,21 @@ echo "  ✅ $OUT"
 
 echo
 echo "== 5) 静态校验 =="
-# 交付构建零调试残留：这一步必须在这里真的执行。只在文档里写"记得跑一次"等于没有门禁——
-# "release 不含 agent-debug"会随下一次改动悄悄失效。
+# 必须在这里真的执行：只在文档里写"记得跑一次"等于没有门禁
 bash Scripts/check-release-clean.sh "$EXE"
-# msiinfo/msiextract 属 Linux 的 msitools，Windows 宿主上没有；其列级导出格式与
-# Windows 侧的 msidump（只给首列）不等价，故不做"看起来一样"的替换 ——
-# 缺工具时改跑 WiX 自带的 ICE 校验 + 表存在性，其余项由第 7 步真机走查承担
-# （安装器一律以真机 msiexec 走查为验收手段，静态校验不单独算过）。
+# 卸载/升级前的退出保护：漏了它不报错，卸载照样返回成功而本体还在跑，故按表校验
+if [ "$MSI_ENGINE" = "wix" ] && command -v powershell >/dev/null 2>&1; then
+  echo "  --- CloseApplication（卸载/升级前先退出程序）表级校验 ---"
+  MSI_W="$OUT"
+  command -v cygpath >/dev/null 2>&1 && MSI_W="$(cygpath -w "$OUT")"
+  powershell -NoProfile -ExecutionPolicy Bypass \
+    -File "$(command -v cygpath >/dev/null 2>&1 && cygpath -w Scripts/check-msi-closeapps.ps1 || echo Scripts/check-msi-closeapps.ps1)" \
+    -Msi "$MSI_W" || die "卸载前的退出保护没进包，见上面的 FAIL 行"
+elif [ "$MSI_ENGINE" = "wix" ]; then
+  echo "  ⚠️ 本机无 powershell，CloseApplication 表级校验跳过（Linux 侧 wixl 方言没这条保护）"
+fi
+# msitools 是 Linux 专有、msidump 只给首列，两者不等价，故不做"看起来一样"的替换：
+# 缺工具时改跑 ICE + 表存在性。安装器一律以真机 msiexec 走查为验收手段。
 if ! command -v msiinfo >/dev/null 2>&1; then
   echo "  ⚠️ 本机无 msiinfo/msiextract（msitools 为 Linux 专有），以下 Linux 侧契约校验跳过："
   echo "     per-user Directory 树挂载 / RemoveFile 条目 / CAB 回环逐字节"
@@ -185,9 +191,7 @@ ls -lh "$OUT_DIR/LinkX-$VERSION-x64.msi"
 cat "$OUT_DIR/LinkX-$VERSION-x64.msi.sha256"
 echo "✅ Windows MSI 交付完成（未签名；SmartScreen 需「更多信息 → 仍要运行」）"
 
-# 装机前先查一遍当前主机上注册了几份 LinkX：同一 ProductCode 落在 per-machine 与
-# per-user 两个作用域时，msiexec 返回 0 却留下两份程序、两套身份（对端因此变成"新设备"）。
-# 这里只提示不阻断——出包成功与否不该由构建机的安装状态决定，但装之前必须看见它。
+# 只提示不阻断：装之前必须看见本机注册了几份 LinkX，判据见 check-install-single.sh
 echo
 echo "== 7) 本机安装份数核对 =="
 if bash "$ROOT/Scripts/check-install-single.sh"; then
