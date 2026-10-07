@@ -67,6 +67,22 @@ pub fn encode(items: &[Tlv]) -> Result<Vec<u8>, TlvError> {
 /// 一条消息里最多的条目数：解析端的内存与循环上界全靠它（这是**对端可控**的输入）
 pub const TLV_MAX_ENTRIES: usize = 32;
 
+/// 按字节预算截字符串，且**只落在字符边界上**。
+///
+/// 设备名、版本串这类字段要塞进定长 TLV，硬切 `&s[..n]` 会在多字节字符中间劈开——
+/// 对端 `from_utf8` 当场失败，表现成"那台设备的名字是空的"。这条不变式以前在三个地方
+/// 各写了一遍（安卓接缝、发现层、会话层），现在只有这一份。
+pub fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// 解析 TLV 序列（任意输入不 panic；截断、条目数超限视为错误）
 ///
 /// 解析端**不**卡 64B 总长：那条是编码侧的自我约束，对端把版本串写长一点就可能超，
@@ -136,6 +152,18 @@ mod tests {
         let n = get(&buf, TAG_ADVERT_NAME).unwrap().unwrap();
         assert_eq!(n, b"pc-home");
         assert!(get(&buf, TAG_SAS).unwrap().is_none());
+    }
+
+    #[test]
+    fn truncation_never_splits_a_multibyte_char() {
+        // 「超」占 3 字节。预算 4 落在 'L' 后面，是合法边界 ⇒ 留 "超L"；
+        // 预算 2 落在「超」中间 ⇒ 必须退到 0，切一半对端 from_utf8 就失败
+        assert_eq!(truncate_utf8("超LinkX", 4), "超L");
+        assert_eq!(truncate_utf8("超LinkX", 2), "");
+        assert_eq!(truncate_utf8("a超b", 2), "a");
+        assert_eq!(truncate_utf8("abc", 8), "abc");
+        assert_eq!(truncate_utf8("🎵🎵", 5), "🎵");
+        assert_eq!(truncate_utf8("🎵", 1), "");
     }
 
     #[test]

@@ -23,8 +23,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 fn main() {

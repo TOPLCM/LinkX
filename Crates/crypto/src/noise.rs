@@ -90,10 +90,6 @@ impl NoiseXxHandshake {
         }
     }
 
-    pub fn is_initiator(&self) -> bool {
-        self.role == Role::Initiator
-    }
-
     /// 标准 XX 完成判定：initiator 写完 msg3、responder 读完 msg3 即完成
     pub fn is_done(&self) -> bool {
         match self.role {

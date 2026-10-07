@@ -9,7 +9,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
 use debuglog::Level;
-use linkx_protocol::tlv_codec::{self, Tlv};
+use linkx_protocol::tlv_codec::{self, truncate_utf8, Tlv};
 use linkx_protocol::{TAG_ADVERT_NAME, TAG_OS, TAG_VERSION};
 use thiserror::Error;
 
@@ -139,18 +139,6 @@ impl DiscoveryBeacon {
     }
 }
 
-/// 在 UTF-8 字符边界上截断到不超过 `max_bytes` 字节
-fn truncate_utf8(s: &str, max_bytes: usize) -> String {
-    if s.len() <= max_bytes {
-        return s.to_string();
-    }
-    let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    s[..end].to_string()
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum DiscoveryError {
     #[error("IO 失败: {0}")]
@@ -203,20 +191,12 @@ impl PeerTable {
         }
     }
 
-    pub fn timeout(&self) -> Duration {
-        self.timeout
-    }
-
     pub fn len(&self) -> usize {
         self.peers.len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.peers.is_empty()
-    }
-
-    pub fn entries(&self) -> &[PeerEntry] {
-        &self.peers
     }
 
     pub fn get(&self, ip: IpAddr) -> Option<&PeerEntry> {
@@ -412,10 +392,6 @@ impl UdpDiscovery {
 
     pub fn stats(&self) -> DiscoveryStats {
         self.stats
-    }
-
-    pub fn broadcast_interval(&self) -> Duration {
-        self.interval
     }
 
     pub fn set_broadcast_interval(&mut self, interval: Duration) {
