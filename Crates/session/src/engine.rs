@@ -70,11 +70,7 @@ fn random_hello_seq() -> u64 {
 /// 按字节上限截断但不切断一个字符：`Vec<u8>::truncate` 会把多字节字符砍成半个，
 /// 对端 `String::from_utf8` 一验就失败，整台设备的名字变成空的。
 fn truncate_name(s: &str, max_bytes: usize) -> Vec<u8> {
-    let mut end = s.len().min(max_bytes);
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    s.as_bytes()[..end].to_vec()
+    tlv_codec::truncate_utf8(s, max_bytes).as_bytes().to_vec()
 }
 
 /// 组一条 HELLO 的正文：名字 / 系统 / 版本 / 序号四条，两条字符串都按预算截断。
@@ -613,11 +609,6 @@ impl SessionEngine {
         self.identity.as_ref().and_then(|i| i.fingerprint().ok())
     }
 
-    /// 本机 RSA 身份 PKCS#8 DER（平台层加密持久化用；identity 不可用时为 None）
-    pub fn own_identity_der(&self) -> Option<Vec<u8>> {
-        self.identity.as_ref().and_then(|i| i.to_pkcs8_der().ok())
-    }
-
     /// 引擎级「已信任对端」快照（平台层持久化信任库用；仅在人工确认后写入）
     pub fn trusted_peers(&self) -> &[TrustedPeer] {
         &self.cfg.trusted_peers
@@ -701,11 +692,6 @@ impl SessionEngine {
         }
         self.in_chunks = rest;
         mine
-    }
-
-    /// 是否有待消费的入站分块
-    pub fn has_chunks(&self) -> bool {
-        !self.in_chunks.is_empty()
     }
 
     /// 入站分块积压多少**字节**，供平台层给 TCP 读线程施压（背压）。
@@ -846,11 +832,6 @@ impl SessionEngine {
     /// 才能区分"对端确实停了"和"对端还在发、这边在悄悄扔"。
     pub fn late_frames_dropped(&self) -> u64 {
         self.late_frames_dropped
-    }
-
-    /// 该 `file_id` 是否已被本端取消
-    pub fn is_file_cancelled(&self, file_id: u64) -> bool {
-        self.cancelled_files.contains(&file_id)
     }
 
     /// 登记一次取消（FIFO 淘汰旧登记）

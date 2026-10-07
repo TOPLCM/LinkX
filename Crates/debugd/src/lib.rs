@@ -162,11 +162,6 @@ pub fn bump(name: &str, delta: u64) {
     *slot = slot.saturating_add(delta);
 }
 
-/// 计数器置值（宿主已有精确数值时用）。
-pub fn set_counter(name: &str, value: u64) {
-    lock_or_recover(counters_slot()).insert(name.to_string(), value);
-}
-
 /// 水位计数：只在 `value` 更大时覆盖。用于「主循环单轮最长耗时」这类**平均值会掩盖尖峰**的判据。
 pub fn bump_max(name: &str, value: u64) {
     let mut c = lock_or_recover(counters_slot());

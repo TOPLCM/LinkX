@@ -27,6 +27,7 @@ use linkx_protocol::pb::{
     AlbumItem, AlbumList, AlbumThumb, DeviceStatus, FileMeta, MediaState, NotificationDismiss,
     NotificationPush, NotificationReplyAck,
 };
+use linkx_protocol::tlv_codec::truncate_utf8;
 use linkx_session::engine::{EngineConfig, EngineEvent, EngineRole, SessionEngine};
 
 fn now_ms() -> i64 {
@@ -43,18 +44,6 @@ const MAX_FIELD_BYTES: usize = 16 * 1024;
 fn live_handles() -> &'static Mutex<HashSet<i64>> {
     static REG: OnceLock<Mutex<HashSet<i64>>> = OnceLock::new();
     REG.get_or_init(|| Mutex::new(HashSet::new()))
-}
-
-/// 在 UTF-8 字符边界上截断到不超过 `max_bytes` 字节
-fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
-    if s.len() <= max_bytes {
-        return s;
-    }
-    let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
 }
 
 /// 长度域为 u16：超出容量时必须显式失败，**不得静默取低位**，否则 Kotlin 侧按错误长度解析 → 协议错位/崩溃。
@@ -697,29 +686,6 @@ pub extern "system" fn Java_com_linkx_app_NativeCore_nativeSendClipboard(
     }))
     .unwrap_or(false);
     sent as c_int
-}
-
-/// 会话状态（state_code::*，未初始化返回 -1）
-#[no_mangle]
-pub extern "system" fn Java_com_linkx_app_NativeCore_nativeState(
-    _env: JNIEnv<'_>,
-    _class: JClass<'_>,
-    handle: jlong,
-) -> jint {
-    catch_unwind(AssertUnwindSafe(|| {
-        with_engine(handle, |e| match e.state() {
-            linkx_session::SessionState::Discover => 0,
-            linkx_session::SessionState::Handshake => 1,
-            linkx_session::SessionState::Pairing => 2,
-            linkx_session::SessionState::SasCompare => 3,
-            linkx_session::SessionState::Paired => 4,
-            linkx_session::SessionState::Repaired => 5,
-            linkx_session::SessionState::Reconnecting => 6,
-            linkx_session::SessionState::Closed => 7,
-        })
-        .unwrap_or(-1)
-    }))
-    .unwrap_or(-1)
 }
 
 /// 注入链路协商到的 ATT MTU。只由 Kotlin 的 linkx-tick 线程调用（与 `nativeTick`/`nativeDrain`

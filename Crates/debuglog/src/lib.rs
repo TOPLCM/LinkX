@@ -441,14 +441,6 @@ pub fn log_dir() -> Option<PathBuf> {
 
 // ---------------------------------------------------------------- 环形现场
 
-/// 环形缓冲全量快照（最近 4KB 原始行）
-pub fn ring_snapshot() -> String {
-    match RING.lock() {
-        Ok(r) => r.snapshot(),
-        Err(_) => String::new(),
-    }
-}
-
 /// 环形缓冲最近 `n` 行
 pub fn ring_tail(n: usize) -> Vec<String> {
     match RING.lock() {

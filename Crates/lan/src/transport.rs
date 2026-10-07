@@ -134,10 +134,6 @@ impl TcpStreamLink {
         Ok(self.stream.peer_addr()?.to_string())
     }
 
-    pub fn replay_window(&self) -> &ReplayWindow {
-        &self.replay
-    }
-
     /// 读一整帧但**不做**抗重放校验：`StreamLink` 以此实现「解密成功后才提交窗口」。
     pub fn read_frame(&mut self) -> Result<(FrameHeader, Vec<u8>), TransportError> {
         let mut head = [0u8; 13];
@@ -196,15 +192,6 @@ impl TcpStreamLink {
                 }
             }
         }
-    }
-
-    /// 只读校验（不提交窗口）——供上层在认证成功后自行 `commit`
-    pub fn check_seq(&self, seq: u32) -> Result<(), TransportError> {
-        self.replay.check(seq).map_err(TransportError::Replay)
-    }
-
-    pub fn commit_seq(&mut self, seq: u32) {
-        self.replay.commit(seq);
     }
 
     /// 读出**完整帧字节**（13B 帧头 + body），可整体交给 `SessionEngine::feed_tcp`；
