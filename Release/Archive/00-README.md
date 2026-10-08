@@ -5,18 +5,19 @@
 ```text
 Archive/
   v<版本>/
-    Windows/LinkX-<版本>-x64.msi.sha256
+    Windows/LinkX-<版本>-x64.msi          安装包本体
+    Windows/LinkX-<版本>-x64.msi.sha256   出包时算出的校验值
+    Android/LinkX-<版本>-release.apk
     Android/LinkX-<版本>-release.apk.sha256
 ```
 
-**仓库里只跟踪校验值，不跟踪安装包本身。** 几十 MB 的二进制进了源码树会把仓库压住，GitHub 对
-单文件也有大小限制。`.gitignore` 里
-`Release/Archive/**/LinkX-*.msi|apk|idsig` 就是这条规则的执行者。
+**安装包本体就在这个目录里，跟着仓库一起发布**（`Release/Archive/**/LinkX-*.idsig` 除外：那是
+apksigner 的中间产物，用户用不上）。想拿某一版的包，`git clone` 后直接进对应文件夹取，或者到
+Releases 页面下载 —— **一个版本一条**（v0.1.0 到 v0.4.5 各一条，v0.5.0、v0.5.1 也各在自己的条目）。
 
-安装包本体在 Releases 页面：**v0.1.0 – v0.4.5** 合并在「历史安装包 v0.1.0 – v0.4.5」那一条
-（标签 `v0.4.5-installers`，18 个文件），**v0.5.0** 与 **v0.5.1** 各在自己的条目里。
-台账里的大小与 SHA-256 由出包时对产物计算得到。要复核，从上面那些条目下载对应版本的文件，
-按 [`../README.md`](../README.md) 里「校验一个包」那节的方法比对哈希。
+这些历史标签指向的是"把这一版的包放进入库"的那次提交，不是当年的源码提交：公开仓库的提交历史是
+整理过的，当年的逐版提交没有一并搬过来。要复核某版到底装了什么，以这条台账的大小与 SHA-256 为准。
+比对方法见 [`../README.md`](../README.md) 里「校验一个包」那节。
 
 规则（与 [`../README.md`](../README.md) 一致）：
 
