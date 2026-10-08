@@ -76,6 +76,21 @@
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" Secure="yes"/>
 
     <!--
+      把用户选过的安装目录**记回注册表并在每次运行前读回来**。
+
+      MSI 每次运行都按 Directory 表重算目标目录，用户改的路径不会自己留下来。后果不是"看着别扭"
+      而是**假卸载**：包装到 D:\LinkX 之后卸载，日志里 `Dir (target): Key: INSTALLFOLDER` 仍然是
+      `%LOCALAPPDATA%\Programs\LinkX`，RemoveFiles 打在一个从没放过文件的目录上，于是卸载返回 0、
+      注册表清干净、D 盘那份本体原地留着。同一处还顺带修掉"升级时又装回默认目录"。
+      判据（探针实测，只改这一处）：修完之后卸载日志变成 `Dir (target): ... Object: D:\LinkXProbeD\`，
+      目录整个删掉；修之前留文件。见 Docs/Diag/uninst-poc/probe-drive.wxs。
+    -->
+    <Property Id="INSTALLFOLDER" Secure="yes">
+      <RegistrySearch Id="RecallInstallFolder" Root="HKCU" Key="Software\LinkX"
+                      Name="InstallDir" Type="raw"/>
+    </Property>
+
+    <!--
       组件选择默认值。
 
       ⚠ MSI CheckBox 的坑：勾选态的判定是「该属性是否已定义」，把默认值写成 Value="0" 仍算
@@ -93,6 +108,21 @@
 
     <!-- 防火墙自定义动作（类型 50）用的 netsh 全路径属性 -->
     <Property Id="NETSH_EXE" Value="[SystemFolder]netsh.exe" Secure="yes"/>
+
+    <!--
+      卸载时连程序自己写的数据目录一起清掉：%APPDATA%\LinkX 里是 settings.ini、设备身份、
+      配对表与日志。MSI 不会碰它（不是这个包装出来的文件），留着就是用户眼里的"假卸载 / 没卸干净"。
+      三条约束：
+        * 只在真卸载时跑，并且**升级不算卸载** —— 升级时把配对删了，用户升个级就得重新配对，
+          与防火墙规则那条同一条判据（NOT UPGRADINGPRODUCTCODE）。
+        * RemoveFile / RemoveFolder 只能删空目录，日志在子目录里，所以走 rmdir /S /Q。
+        * 类型 51 先把 cmd.exe 展开成真实路径（同 NETSH_EXE：类型 50/114 的 Source 取属性字面值）。
+      探针实测：Roaming 下先放 settings.ini 与 Logs/a.ndjson，卸载之后整个目录不见。
+    -->
+    <Property Id="CMD_EXE" Value="cmd.exe" Secure="yes"/>
+    <CustomAction Id="SetCmdExe" Property="CMD_EXE" Value="[SystemFolder]cmd.exe"/>
+    <CustomAction Id="CleanUserData" Property="CMD_EXE" Execute="immediate" Return="ignore"
+                  ExeCommand="/C if exist &quot;[AppDataFolder]LinkX&quot; rmdir /S /Q &quot;[AppDataFolder]LinkX&quot; &amp; if exist &quot;[LocalAppDataFolder]LinkX&quot; rmdir /S /Q &quot;[LocalAppDataFolder]LinkX&quot;"/>
 
     <!-- 主要升级：检测同 UpgradeCode 的旧版本，先卸旧再装新 -->
     <MajorUpgrade AllowSameVersionUpgrades="yes"
@@ -207,6 +237,10 @@
            表现是"升过级就连不上手机"，所以必须再挡一道 NOT UPGRADINGPRODUCTCODE。 -->
       <Custom Action="FwDel" Before="RemoveFiles"
               Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE"/>
+      <!-- 数据目录同一条判据：升级要保住配对，真卸载才连配置一起清 -->
+      <Custom Action="SetCmdExe" Before="CleanUserData"/>
+      <Custom Action="CleanUserData" Before="RemoveFiles"
+              Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE"/>
     </InstallExecuteSequence>
 
     <!-- 功能/组件：主程序恒装；开始菜单默认装；开机自启 / 防火墙默认不装（Level=2 > INSTALLLEVEL=1） -->
@@ -253,6 +287,8 @@
       <RegistryValue Root="HKCU" Key="SOFTWARE\LinkX" Name="InstallPath" Type="string" Value="[INSTALLFOLDER]" KeyPath="yes"/>
       <RegistryValue Root="HKCU" Key="SOFTWARE\LinkX" Name="Version" Type="string" Value="@VERSION@"/>
       <RegistryValue Root="HKCU" Key="SOFTWARE\LinkX" Name="Publisher" Type="string" Value="LinkX Project"/>
+      <!-- 上面那条 RecallInstallFolder 读的就是这个值：记下真实落点，卸载/升级才找得到目录 -->
+      <RegistryValue Root="HKCU" Key="SOFTWARE\LinkX" Name="InstallDir" Type="string" Value="[INSTALLFOLDER]"/>
       <!--
         卸载清残留（随组件卸载移除）：先移除安装目录，再移除其父目录。
         ProgramsFolder 是 %LOCALAPPDATA%\Programs —— 非空时 RemoveFolder 会静默跳过，
@@ -379,17 +415,27 @@
         加 Indirect 后控件改绑 INSTALLFOLDER 目录属性（其值是 CostFinalize 算出的真实路径），
         与 WiX 官方 WixUI 的 BrowseDlg / InstallDirDlg 写法一致（Property="_BrowseProperty" Indirect="yes"）
       -->
+      <!--
+        这一页原先有个 DirectoryCombo（磁盘下拉），实测**它只会列出当前目标所在那一个卷**：
+        本机 C:/D:/E: 三块固定盘，下拉里只有 C:\；换成 per-machine 包（默认目录在 Program Files）
+        还是只有 C:\；换成 VolumeSelectCombo 控件则整个是空的。用户看到"只有 C 盘"就以为安装器
+        认不出他的盘 —— 这正是外部报回来的现象，而真相是 MSI 这套控件不提供跨卷选择。
+        所以这里**删掉那个下拉**，把"直接改路径"这条路摆明：路径框本来就吃任意盘符，改完照样装、
+        卸载也照样找得回来（靠上面那条 InstallDir 回读）。留着列表是为了在同一个盘里翻文件夹。
+      -->
       <Dialog Id="InstallDirDlg" Width="370" Height="270" Title="[ProductName] 安装位置">
         <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0"/>
         <Control Id="Title" Type="Text" X="20" Y="15" Width="330" Height="18" Transparent="yes" NoPrefix="yes"
                  Text="安装位置"/>
         <Control Id="Description" Type="Text" X="20" Y="52" Width="330" Height="20" Transparent="yes" NoPrefix="yes"
-                 Text="选择要把 [ProductName] 装到哪个文件夹，也可以直接改下面这行路径。"/>
-        <Control Id="FolderCombo" Type="DirectoryCombo" X="20" Y="78" Width="330" Height="80"
-                 Property="WIXUI_INSTALLDIR" Indirect="yes" Fixed="no"/>
-        <Control Id="FolderList" Type="DirectoryList" X="20" Y="78" Width="330" Height="130" Sunken="yes"
+                 Text="选择要把 [ProductName] 装到哪个文件夹。"/>
+        <Control Id="DriveHint" Type="Text" X="20" Y="74" Width="330" Height="28" Transparent="yes" NoPrefix="yes"
+                 Text="想装到别的盘：直接在下面这行改盘符，例如 D:\LinkX。&#10;上面的列表只用来在同一个盘里翻文件夹。"/>
+        <Control Id="FolderList" Type="DirectoryList" X="20" Y="106" Width="330" Height="82" Sunken="yes"
                  Property="WIXUI_INSTALLDIR" Indirect="yes"/>
-        <Control Id="PathEdit" Type="PathEdit" X="20" Y="214" Width="330" Height="17"
+        <Control Id="PathLabel" Type="Text" X="20" Y="194" Width="330" Height="12" Transparent="yes" NoPrefix="yes"
+                 Text="安装到"/>
+        <Control Id="PathEdit" Type="PathEdit" X="20" Y="208" Width="330" Height="17"
                  Property="WIXUI_INSTALLDIR" Indirect="yes"/>
         <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0"/>
         <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="上一步">
@@ -498,13 +544,44 @@
         </Control>
       </Dialog>
 
+      <!--
+        已经装过之后再双击安装包：原先没有任何页面，向导直接走完 —— 静默重装一遍、
+        顺手把正在运行的 LinkX 结束掉，用户完全不知道发生了什么（想"改个安装目录"的人
+        撞上的就是这一面）。这一页把三条路摆出来：修一下、卸掉、什么都不做。
+        换安装目录没有单独给按钮：MSI 的"更改"要走功能选择页，而我们的可选组件只有
+        快捷方式/自启/防火墙三项，路径改不了；要挪位置就是先卸载再装一次。
+      -->
+      <Dialog Id="MaintenanceDlg" Width="370" Height="270" Title="[ProductName] 已安装">
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0"/>
+        <Control Id="Title" Type="Text" X="20" Y="15" Width="330" Height="18" Transparent="yes" NoPrefix="yes"
+                 Text="[ProductName] 已经在这台电脑上"/>
+        <Control Id="MaintText" Type="Text" X="20" Y="60" Width="330" Height="60" Transparent="yes" NoPrefix="yes"
+                 Text="当前装的是 [ProductVersion]。&#10;&#10;「修复」重新装一遍同一份文件；「卸载」把程序和它的配置、配对信息一起清掉。&#10;想换个盘装：先卸载，再运行安装包选目录。"/>
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0"/>
+        <Control Id="Repair" Type="PushButton" X="20" Y="243" Width="56" Height="17" Text="修复">
+          <Publish Event="Reinstall" Value="ALL" Order="1"/>
+          <Publish Event="EndDialog" Value="Return" Order="2"/>
+        </Control>
+        <Control Id="Remove" Type="PushButton" X="82" Y="243" Width="56" Height="17" Text="卸载">
+          <Publish Event="Remove" Value="ALL" Order="1"/>
+          <Publish Event="EndDialog" Value="Return" Order="2"/>
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Default="yes" Cancel="yes" Text="取消">
+          <Publish Event="EndDialog" Value="Exit"/>
+        </Control>
+      </Dialog>
+
       <!-- 7) Finish -->
       <Dialog Id="ExitDialog" Width="370" Height="270" Title="[ProductName] 安装完成">
         <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0"/>
         <Control Id="Title" Type="Text" X="20" Y="15" Width="330" Height="18" Transparent="yes" NoPrefix="yes"
                  Text="安装完成"/>
         <Control Id="ExitText" Type="Text" X="20" Y="60" Width="330" Height="80" Transparent="yes" NoPrefix="yes"
-                 Text="[ProductName] [ProductVersion] 已经装好了。&#10;&#10;您可以从桌面或开始菜单启动 LinkX。点击「完成」关闭本向导。"/>
+                 Text="[ProductName] [ProductVersion] 已经装好了。&#10;&#10;您可以从桌面或开始菜单启动 LinkX。点击「完成」关闭本向导。"
+                 Hidden="yes" ShowCondition="NOT REMOVE"/>
+        <Control Id="ExitTextRemoved" Type="Text" X="20" Y="60" Width="330" Height="80" Transparent="yes" NoPrefix="yes"
+                 Text="[ProductName] 已经卸载，程序文件与配置都清掉了。&#10;&#10;重新安装之后要与手机重新配一次对。"
+                 Hidden="yes" ShowCondition="REMOVE"/>
         <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0"/>
         <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Disabled="yes" Text="上一步"/>
         <Control Id="Finish" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Cancel="yes" Text="完成">
@@ -514,6 +591,8 @@
 
       <InstallUISequence>
         <Show Dialog="WelcomeDlg" Before="ProgressDlg" Overridable="yes" Condition="NOT Installed"/>
+        <Show Dialog="MaintenanceDlg" Before="ProgressDlg" Overridable="yes"
+              Condition="Installed AND NOT REMOVE AND NOT REINSTALL"/>
         <Show Dialog="ProgressDlg" Before="ExecuteAction" Overridable="yes"/>
         <Show Dialog="ExitDialog" OnExit="success" Overridable="yes"/>
       </InstallUISequence>
