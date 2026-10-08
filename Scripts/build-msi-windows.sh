@@ -104,7 +104,7 @@ if [ "$MSI_ENGINE" = "wix" ] && command -v powershell >/dev/null 2>&1; then
   MSI_W="$OUT"
   command -v cygpath >/dev/null 2>&1 && MSI_W="$(cygpath -w "$OUT")"
   powershell -NoProfile -ExecutionPolicy Bypass \
-    -File "$(command -v cygpath >/dev/null 2>&1 && cygpath -w Scripts/check-msi-closeapps.ps1 || echo Scripts/check-msi-closeapps.ps1)" \
+    -File "$(command -v cygpath >/dev/null 2>&1 && cygpath -w Scripts/check-msi-uninstall.ps1 || echo Scripts/check-msi-uninstall.ps1)" \
     -Msi "$MSI_W" || die "卸载前的退出保护没进包，见上面的 FAIL 行"
 elif [ "$MSI_ENGINE" = "wix" ]; then
   echo "  ⚠️ 本机无 powershell，CloseApplication 表级校验跳过（Linux 侧 wixl 方言没这条保护）"
