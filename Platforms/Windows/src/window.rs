@@ -1818,8 +1818,12 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 }
             }
         }
-        // 外部（安装程序 / Restart Manager）请退出：一声不响地收尾
-        WM_CLOSE => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+        // 外部（安装程序 / Restart Manager）请退出：不摆询问框（那会停在没人看的窗口上），
+        // 只在托盘留一句 —— 气泡由外壳持有，我们退了它还在，否则用户看见的只是图标自己没了
+        WM_CLOSE => unsafe {
+            crate::tray::show_balloon("LinkX 已退出", "安装程序要求结束程序，LinkX 已退出。");
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        },
         // 已经答过一次（弹窗里选了退出）或功能改动要重启：不再询问，直接走默认收尾
         WM_APP_EXIT => {
             let _ = unsafe { DefWindowProcW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0)) };
