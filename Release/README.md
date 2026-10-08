@@ -1,18 +1,18 @@
 # Release 目录约定
 
-这里是交付物出口，不是源码。**安装包二进制不入库**：二进制走 Releases 页面分发，
-仓库里跟踪的只有校验值——当前版本登记在本页，已退役版本逐版登记在 `Archive/`。
+这里是交付物出口，不是源码。**当前版本的二进制不入库**（走 Releases 页面分发），
+**已退役版本连包带校验值一起归档在 `Archive/`**，克隆仓库就能取到那一代的原包。
 `.gitignore` 排除了 `Release/Windows/*`、`Release/Android/*`、`Release/Debug/*`
-与 `Release/Archive/**/LinkX-*.{msi,apk,idsig}`。
+与 `Release/Archive/**/LinkX-*.idsig`（后者是签名中间件，用户用不上）。
 
 ```text
-Release/                          （除 Archive 里的 .sha256 之外，下面都是本机产物、不入库）
+Release/                          （Windows/、Android/、Debug/ 是本机产物、不入库；Archive/ 入库）
   Windows/LinkX-<版本>-x64.msi              当前版本：电脑端安装包（+ .sha256）
   Android/LinkX-<版本>-release.apk          当前版本：手机端交付 APK（+ .sha256）
   Debug/                                    调试包：不入库、不归档
-  Archive/v<版本>/                          已退役版本，每版一层
-    Windows/LinkX-<版本>-x64.msi.sha256
-    Android/LinkX-<版本>-release.apk.sha256
+  Archive/v<版本>/                          已退役版本，每版一层（本体 + .sha256 都在库里）
+    Windows/LinkX-<版本>-x64.msi{,.sha256}
+    Android/LinkX-<版本>-release.apk{,.sha256}
 ```
 
 ## 三条规则
@@ -64,12 +64,12 @@ release APK 的字节也会变** —— 源码行号会编进 `.so`，所以安�
 
 ## 校验一个包
 
-安装包不在仓库里（`Release/Windows/`、`Release/Android/` 是出包机器上的目录，克隆下来是空的），
+当前版本的安装包不在仓库里（`Release/Windows/`、`Release/Android/` 是出包机器上的目录，克隆下来是空的），
 所以核对的对象是**你从 Releases 页面下载到的那个文件**：
 
 ```powershell
 Get-FileHash -Algorithm SHA256 "$env:USERPROFILE\Downloads\LinkX-0.5.1-x64.msi"
 ```
 
-输出的哈希与上面那张表一致，才算拿到同一个文件。历史版本同理：`.sha256` 校验值在本仓库
-`Archive/v<版本>/` 里逐版跟踪，安装包本体在 Releases 页面。
+输出的哈希与上面那张表一致，才算拿到同一个文件。历史版本同理：核对值在
+`Archive/v<版本>/*.sha256`，本体可以就从同一目录取，也可以从 Releases 页面下载（一个版本一条）。
