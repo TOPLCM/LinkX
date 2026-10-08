@@ -39,11 +39,9 @@ Docs/Diag/**/*.exe
 Docs/Diag/**/*.obj
 Docs/Diag/**/target/
 
-# 本机产物：历史调试包 + 归档目录里的安装包二进制（仓库只跟踪 .sha256 校验值，
-# 二进制走 Releases 页面分发；这条规则也防止 git add Release/Archive 把几十 MB 拉进树）
+# 本机产物：历史调试包 + 归档的安装包的签名中间件。.idsig 是 apksigner 的中间产物，
+# 用户拿不到用处，跟着二进制入库只会白占体积
 Release/Debug/
-Release/Archive/**/LinkX-*.msi
-Release/Archive/**/LinkX-*.apk
 Release/Archive/**/LinkX-*.idsig
 
 .zcode/
