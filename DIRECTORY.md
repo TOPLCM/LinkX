@@ -124,7 +124,8 @@ TCP 连接与读写线程、加密字节流的分帧、抗重放与背压窗口�
 ## Release/
 
 `Release/README.md` 登记当前版本交付物的清单与校验值，`Archive/00-README.md` 是逐版校验值台账，
-`Archive/v<版本>/{Windows,Android}/` 只跟踪 `.sha256` 文件。安装包二进制走 Releases 页面分发。
+`Archive/v<版本>/{Windows,Android}/` 里安装包本体与 `.sha256` 一起入库（`.idsig` 是签名中间件，
+不入库）。当前版本的二进制走 Releases 页面分发，不跟仓库走。
 `Debug/` 是本机的调试包目录，不入库也不归档。
 
 ## Scripts/
