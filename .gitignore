@@ -11,7 +11,7 @@ Platforms/Android/*.iml
 *.jks
 /Temp/
 
-# 工具链真身（体积巨大，仅本机/沙箱持久化，不入源码库；恢复见 Scripts/restore-toolchain.sh）
+# 工具链真身（体积巨大，只在本机持久化，不入源码库；装法见 Docs/当前/工具链与换机.md）
 /Tools/Toolchain/
 
 # WiX Toolset 本机安装副本（同上，属工具链真身，非项目源码；磁盘保留，仅不入库）
@@ -35,9 +35,9 @@ __pycache__/
 
 # PoC 与走查脚手架的**二进制**只在本机跑，源码留档；少了这两条，一次 `git add -A`
 # 就会把几十 KB 的 exe 写进历史（公开副本虽然按目录排除，历史里抹不掉）
-Docs/Diag/**/*.exe
-Docs/Diag/**/*.obj
-Docs/Diag/**/target/
+Docs/归档/取证/**/*.exe
+Docs/归档/取证/**/*.obj
+Docs/归档/取证/**/target/
 
 # 本机产物：历史调试包 + 归档的安装包的签名中间件。.idsig 是 apksigner 的中间产物，
 # 用户拿不到用处，跟着二进制入库只会白占体积

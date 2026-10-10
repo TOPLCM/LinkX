@@ -83,7 +83,7 @@
       `%LOCALAPPDATA%\Programs\LinkX`，RemoveFiles 打在一个从没放过文件的目录上，于是卸载返回 0、
       注册表清干净、D 盘那份本体原地留着。同一处还顺带修掉"升级时又装回默认目录"。
       判据（探针实测，只改这一处）：修完之后卸载日志变成 `Dir (target): ... Object: D:\LinkXProbeD\`，
-      目录整个删掉；修之前留文件。见 Docs/Diag/uninst-poc/probe-drive.wxs。
+      目录整个删掉；修之前留文件。见 Docs/归档/取证/installer-probe/probe-drive.wxs。
     -->
     <Property Id="INSTALLFOLDER" Secure="yes">
       <RegistrySearch Id="RecallInstallFolder" Root="HKCU" Key="Software\LinkX"
