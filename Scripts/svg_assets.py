@@ -59,8 +59,6 @@ NAME_MAP = {
     "右播放.svg": "next",
     "音量大.svg": "vol_up",
     "音量小.svg": "vol_down",
-    "随机播放.svg": "shuffle",
-    "单曲循环.svg": "repeat",
 }
 NAV_NAMES = {
     "link", "bell", "clipboard", "folder", "media", "blocks", "settings", "phone", "info",
