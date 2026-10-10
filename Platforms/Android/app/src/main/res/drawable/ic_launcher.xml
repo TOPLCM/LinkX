@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- LinkX 品牌图标：蓝色渐变圆角底 + 白色 logo。
-     由 Scripts/svg_assets.py 从 `svg/LinkX Logo.svg` 生成，**勿手改**；
-     与 Windows 的 LinkX.ico、导航图标的 `icons_svg.rs` 完全同源同形。
+     由 Scripts/svg_assets.py 从 `svg/LinkX Logo.svg` 生成，勿手改；
+     与 Windows 的 LinkX.ico、导航图标的 icons_svg.rs 完全同源同形。
      映射：24 网格 → 108dp 画布，(v-12)*3.05+54（网格中心对画布中心）。
      自适应图标的安全区是 66dp，logo 撑到 18×3.05=55dp，四边留白足够。 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
