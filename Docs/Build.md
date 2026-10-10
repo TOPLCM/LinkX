@@ -88,9 +88,8 @@ done
 | `verify-resume.py` | 断点续传四用例（故障注入 + 不注错的反向对照） |
 | `soak-transfer.py` | 双向浸泡多轮，只认 `file.meta` + `file.done` 这一对与落盘字节数 |
 | `bench-throughput.py` | 双向吞吐与电脑端工作集峰值（内存红线的实测口） |
-| `stress-pair.py` | 反复配对的稳定性（进程死亡与系统崩溃记录） |
-| `mem-map.py` / `measure-feature-memory.py` | 内存构成与功能开关收益实测 |
-| `ui-shot.py` / `check-repaint.py` / `nav_preview.py` | 界面截图、重绘触发取证、图标肉眼验收 |
+| `mem-map.py` | 工作集构成（只读，不改被测代码） |
+| `ui-shot.py` | 活窗口界面截图（改完 UI 肉眼验收用） |
 
 > 依赖面已经很小：2026-09-30 删掉 vendored LocalSend 与未接线的互操作层之后，
 > `Cargo.lock` 从 287 个唯一 crate 降到 160 个，tokio / hyper / reqwest / rustls 全部不再出现。

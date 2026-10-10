@@ -117,9 +117,10 @@ TCP 连接与读写线程、加密字节流的分帧、抗重放与背压窗口�
 
 ## svg/
 
-25 个 SVG 是图标唯一真源，含产品 Logo 几何。`Scripts/svg_assets.py` 由它生成两端矢量资源、
-`LinkX.ico` 与 `ic_launcher.xml`。分组是：Logo、侧边栏导航九枚、媒体控制九枚、
-动作与状态类若干。
+23 个 SVG 是图标唯一真源，含产品 Logo 几何。`Scripts/svg_assets.py` 由它生成两端矢量资源、
+`LinkX.ico` 与 `ic_launcher.xml`。分组是：Logo、侧边栏导航九枚、媒体控制七枚
+（播放/暂停/上一首/下一首/音量两档/曲目），以及上传下载、复制发送、电量等动作与状态若干。
+两端都没用上的图标不放进来——2026-10-11 清掉了随机播放与单曲循环两枚，产品本来就不切播放模式。
 
 ## Release/
 
@@ -136,14 +137,12 @@ Python 脚本只用标准库。构建出包：`build-mingw-windows.sh` 与 `buil
 `check-compose-kotlin-pair.sh` 查 Compose 与 Kotlin 版本配对，`check-release-clean.sh` 查交付产物
 无调试残留，`check-install-single.sh` 查安装份数与作用域，`check-comment-hygiene.sh` 查注释卫生。
 `check-release-ledger.py` 核对 `Release/README.md` 登记的哈希与大小，本地出包后跑，不进 CI。
-`check-repaint.py` 用来看活窗口的刷新是否跟得上数据变化。
 
 图标链是 `svg_assets.py` 加两个模板 `launcher_icon.tmpl`、`vector_icon.tmpl`。
 真机验收与测量：`check-file-transfer.py`（电脑端→手机端）、`check-phone-to-pc.py`（手机端→电脑端）、
-`soak-transfer.py`（多轮双向传输）、`verify-resume.py`（断点续传）、`stress-pair.py`（重复配对）、
-`bench-throughput.py`（吞吐与工作集峰值）、`mem-map.py`（工作集构成）、
-`measure-feature-memory.py`（功能开关的内存收益）、`ui-shot.py` 与 `nav_preview.py`（界面截图与
-图标预览）、`linkx-ctl.py`（调试控制面命令行）、`msi-walkthrough.ps1`（安装向导走查）。
+`soak-transfer.py`（多轮双向传输）、`verify-resume.py`（断点续传）、
+`bench-throughput.py`（吞吐与工作集峰值）、`mem-map.py`（工作集构成）、`ui-shot.py`（界面截图）、
+`linkx-ctl.py`（调试控制面命令行）。
 
 ## 不在仓库里的东西
 
@@ -152,7 +151,7 @@ Python 脚本只用标准库。构建出包：`build-mingw-windows.sh` 与 `buil
 | `Target/` | cargo 构建目录 | 构建产物 |
 | `Release/Windows/`、`Release/Android/` | 当前版本的安装包 | 二进制走 Releases 页面，校验值登记在 `Release/README.md` |
 | `Release/Debug/` | 调试包 | 不交付、不归档 |
-| `Release/Archive/` 里的安装包本体 | 历史版本的 `.msi`、`.apk`、`.idsig` | 同上，仓库只跟踪 `.sha256` |
+| `Release/Archive/` 里的 `.idsig` | apksigner 的签名中间件 | 对读者没用；**安装包本体（`.msi`/`.apk`）是入库的**，逐版都能克隆下来直接拿 |
 | `Tests/fuzz/artifacts/` | fuzz 崩溃样本 | 语料种子才是回归资产 |
 | `*.jks`、`*.keystore` | 签名密钥 | 密钥不入库 |
 
