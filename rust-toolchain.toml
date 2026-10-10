@@ -1,7 +1,7 @@
 # Y13：Rust 无 LTS，用具体 channel 锁可复现构建（5.1）
 # 注：1.97.1 现在由 workspace 自身与 CI 锁定；0.3.0 时抬版本是为了 vendored LocalSend，那份代码 2026-09-30 已删除
 # 升级到 1.97.1；与 CI build.yaml、Scripts/build-android-core.sh 三处锁定一致。
-# 历史：1.78.1 曾被上游/rsproxy 下架回退 1.90.0（详见 03-DecisionLog 决策 B2）。
+# 历史：1.78.1 曾被上游/rsproxy 下架回退 1.90.0（详见 决策记录 决策 B2）。
 [toolchain]
 channel = "1.97.1"
 targets = ["aarch64-linux-android", "x86_64-pc-windows-gnu"]
