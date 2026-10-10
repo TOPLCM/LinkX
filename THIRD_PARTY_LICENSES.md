@@ -47,9 +47,9 @@ Apache-2.0 §4(a) 与 GPL-3.0 §4 都要求"作品的任何分发形式"附带�
 
 ## 三、图标包来源与授权
 
-`svg/` 下 25 个 SVG 里有 24 个带 iconfont.cn 的导出指纹 `p-id="…"` 与 `t="…"`，
+`svg/` 下 23 个 SVG 里有 22 个带 iconfont.cn 的导出指纹 `p-id="…"` 与 `t="…"`，
 `关于.svg` 没有这组指纹。`Scripts/svg_assets.py` 以该目录为唯一真源，把路径几何内联进
-`Platforms/Windows/src/icons_svg.rs`，生成安卓侧 24 个 vector drawable，并栅格化进 `LinkX.ico`
+`Platforms/Windows/src/icons_svg.rs`，生成安卓侧 22 个 vector drawable，并栅格化进 `LinkX.ico`
 （嵌入 exe 资源、MSI 的 `Icon` 表与快捷方式）。这些几何因此进入了产物，产品标识本身也在其中。
 
 授权口径：本仓库版权人确认这些图标取自 www.iconfont.cn，按其下载时的站点条款可以公开免费使用，
@@ -57,7 +57,7 @@ Apache-2.0 §4(a) 与 GPL-3.0 §4 都要求"作品的任何分发形式"附带�
 确认人，是为了避免日后把它当成我们自己画的。
 
 这些图标的线性描边风格参照 Remix Icon（Apache-2.0），只是画法上的参照：仓库里没有它的任何文件，
-也没从它那儿取过路径。进了产物的几何全部出自 `svg/` 这 25 个文件。
+也没从它那儿取过路径。进了产物的几何全部出自 `svg/` 这 23 个文件。
 
 如果日后发现某个图标不允许再分发，处置办法是替换该图标后重跑 `python Scripts/svg_assets.py`，
 生成物全部可重放。
