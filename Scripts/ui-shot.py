@@ -8,7 +8,7 @@
       环境变量 UI_CROP=x,y,w,h 裁一块、UI_ZOOM=n 放大，用于逐点挑细节。
 
 注意：`PrintWindow` 会强制目标重画，所以本工具只能回答"这一帧长什么样"；
-要证明"界面会自己刷新"必须用 `Scripts/check-repaint.py`（从屏幕 DC 抠像素）。
+要证明"界面会自己刷新"，就用本脚本隔一秒连拍两张再比像素（从屏幕 DC 抠图，不看控件自报状态）。
 """
 import ctypes
 import os
