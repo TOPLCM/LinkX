@@ -1,3 +1,7 @@
+/**
+ * 一条通知的可操作面：能不能关掉它、能不能替用户回复它。
+ */
+
 package com.linkx.app
 
 import android.app.RemoteInput

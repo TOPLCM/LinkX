@@ -136,8 +136,13 @@ jobs:
       - name: 全量单测（含 Windows 壳）
         run: cargo test --workspace
       # 共享核心的 clippy 在 Linux 上做，壳与自检程序在这台真 Windows 上补。
+      #
+      # `missing_const_for_thread_local` 是 clippy 1.97 的误报：它建议把 thread_local 的
+      # 初值包进 `const { … }`，而本仓库那几处**已经是** `const { Cell::new(false) }`，
+      # lint 仍照报。改代码去迎合它反而会把"每次调用都重新初始化"的写法引进来，
+      # 所以这里按 lint 名单单独放行，别的一律照旧 `-D warnings`。
       - name: 静态检查 Windows 壳与自检程序（clippy）
-        run: cargo clippy -p linkx-windows -p linkx-storage -p linkx-app --all-targets -- -D warnings
+        run: cargo clippy -p linkx-windows -p linkx-storage -p linkx-app --all-targets -- -D warnings -A clippy::missing_const_for_thread_local
   # ── JNI 门禁──────────────────────────────────────────────
   # linkx-ffi 的 jni feature 不在默认构建里；单独编译并测一次，免得只在发版前人肉发现。
   jni-gate:

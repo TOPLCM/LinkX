@@ -83,7 +83,7 @@
       `%LOCALAPPDATA%\Programs\LinkX`，RemoveFiles 打在一个从没放过文件的目录上，于是卸载返回 0、
       注册表清干净、D 盘那份本体原地留着。同一处还顺带修掉"升级时又装回默认目录"。
       判据（探针实测，只改这一处）：修完之后卸载日志变成 `Dir (target): ... Object: D:\LinkXProbeD\`，
-      目录整个删掉；修之前留文件。见 内部归档/取证/installer-probe/probe-drive.wxs。
+      目录整个删掉；修之前留文件。探针本身在内部走查记录里（不进公开仓库）。
     -->
     <Property Id="INSTALLFOLDER" Secure="yes">
       <RegistrySearch Id="RecallInstallFolder" Root="HKCU" Key="Software\LinkX"
@@ -232,11 +232,24 @@
       <Custom Action="FwAdd" After="InstallFiles"
               Condition="OPT_FIREWALL=&quot;1&quot; AND NOT Installed"/>
       <Custom Action="SetNetshDel" Before="FwDel"/>
-      <!-- 卸载时删规则，但**升级不算卸载**：`REMOVE~="ALL"` 在"升级顺带卸掉旧版本"时也成立，
-           而 FwAdd 的条件是 `NOT Installed`（升级时不重跑）—— 两边一凑，升级完防火墙规则就没了，
-           表现是"升过级就连不上手机"，所以必须再挡一道 NOT UPGRADINGPRODUCTCODE。 -->
+      <!--
+        防火墙规则：先清后建，两趟都要照顾到。
+
+        升级时删规则，但**升级不算卸载**：`REMOVE~="ALL"` 在"升级顺带卸掉旧版本"时也成立，
+        而 FwAdd 的条件是 `NOT Installed`（升级时不重跑）—— 两边一凑，升级完防火墙规则就没了，
+        表现是"升过级就连不上手机"，所以必须再挡一道 NOT UPGRADINGPRODUCTCODE。
+
+        ⚠ 但 ProductCode 由 WiX 每次构建自动生成，所以**每次装新版都是一次升级**
+        （同 UpgradeCode + AllowSameVersionUpgrades）。实测（2026-10-29 安装日志）：
+        FwAdd 在"新装那一趟"会跑（那时 Installed 还是空的），
+        而 FwDel 在"旧产品移除那一趟"被 NOT UPGRADINGPRODUCTCODE 挡住 —— 两边一凑，
+        装几次就有几条同名同端口的入站规则堆在防火墙里（实测装完是 2 条）。
+        修法：把"新装/升级"这一路也纳入 FwDel，顺序上 FwDel（RemoveFiles 之前）
+        仍早于 FwAdd（InstallFiles 之后），所以是"先清后建"；真卸载那一路不变。
+        升级中取消勾选防火墙的那一路仍由真卸载那条兜底，不动。
+      -->
       <Custom Action="FwDel" Before="RemoveFiles"
-              Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE"/>
+              Condition="(REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE) OR (OPT_FIREWALL=&quot;1&quot; AND NOT Installed)"/>
       <!-- 数据目录同一条判据：升级要保住配对，真卸载才连配置一起清 -->
       <Custom Action="SetCmdExe" Before="CleanUserData"/>
       <Custom Action="CleanUserData" Before="RemoveFiles"
@@ -280,6 +293,9 @@
             Source="Licenses/localsend/LICENSE"/>
       <File Id="LocalSendNoticeFile" Name="NOTICE-localsend.txt"
             Source="Licenses/localsend/NOTICE"/>
+      <!-- Apache-2.0 §4(d)：声明改动的那份 PORTING.md 也要随包走，否则「已声明改动」的义务没履行。 -->
+      <File Id="LocalSendPortingFile" Name="PORTING-localsend.md"
+            Source="Licenses/localsend/PORTING.md"/>
       <!--
         per-user 安装的硬要求（ICE38）：组件的 KeyPath 必须是 HKCU 下的注册表项，不能是文件。
         若把 KeyPath 放在 <File> 上，wix msi validate 报 ICE38 error。
@@ -396,9 +412,21 @@
         <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="上一步">
           <Publish Event="NewDialog" Value="WelcomeDlg"/>
         </Control>
+        <!--
+          「必须勾选才能下一步」的两道闸：
+
+          1) ControlCondition（Disable/Enable）：没勾时「下一步」是灰的，勾上就恢复。
+             ⚠ 这张表要有**两行**才有正确语义：只有 Enable 行的话，"没勾"时条件为假、
+             什么动作都不做，控件保持 MSI 的默认状态——也就是**可点**。这正是旧版本
+             "不打勾也能点下一步"的根因（EnableCondition 只写了 Enable 一行）。
+          2) Publish 的 Condition：不勾时**不发生页面跳转**。就算控件状态被别的机制
+             改回可点，点下去也不会走到下一页——许可协议不是"建议"，是闸门。
+
+          两条同时在：灰按钮给出视觉反馈，条件跳转给出行为保证。
+        -->
         <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="下一步"
-                 EnableCondition="LicenseAccepted">
-          <Publish Event="NewDialog" Value="InstallDirDlg"/>
+                 DisableCondition="NOT LicenseAccepted" EnableCondition="LicenseAccepted">
+          <Publish Event="NewDialog" Value="InstallDirDlg" Condition="LicenseAccepted"/>
         </Control>
         <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="取消">
           <Publish Event="EndDialog" Value="Exit"/>
@@ -406,37 +434,32 @@
       </Dialog>
 
       <!--
-        3) Destination folder（DirectoryCombo + DirectoryList + PathEdit 绑定 WIXUI_INSTALLDIR）
+        3) 安装位置（版式照 LocalSend：一个能改的路径框占主位，下面一句话说清装到哪）
 
-        ⚠ 这三个控件**必须**加 Indirect="yes"（wixl 原版没加）。
+        ⚠ PathEdit 必须加 Indirect="yes"（wixl 原版没加）。
         WIXUI_INSTALLDIR 的值是目录属性**名**（"INSTALLFOLDER"）而非路径；不加 Indirect 时控件把
         字符串 "INSTALLFOLDER" 当路径用，创建对话框的瞬间就触发
           MSI 错误 1314「指定的路径 "INSTALLFOLDER" 不可用」（并连带 2867 error dialog not set）
         加 Indirect 后控件改绑 INSTALLFOLDER 目录属性（其值是 CostFinalize 算出的真实路径），
         与 WiX 官方 WixUI 的 BrowseDlg / InstallDirDlg 写法一致（Property="_BrowseProperty" Indirect="yes"）
-      -->
-      <!--
-        这一页原先有个 DirectoryCombo（磁盘下拉），实测**它只会列出当前目标所在那一个卷**：
-        本机 C:/D:/E: 三块固定盘，下拉里只有 C:\；换成 per-machine 包（默认目录在 Program Files）
-        还是只有 C:\；换成 VolumeSelectCombo 控件则整个是空的。用户看到"只有 C 盘"就以为安装器
-        认不出他的盘 —— 这正是外部报回来的现象，而真相是 MSI 这套控件不提供跨卷选择。
-        所以这里**删掉那个下拉**，把"直接改路径"这条路摆明：路径框本来就吃任意盘符，改完照样装、
-        卸载也照样找得回来（靠上面那条 InstallDir 回读）。留着列表是为了在同一个盘里翻文件夹。
+
+        改版式的原因：这一页原来摆着一个 DirectoryList（目录树）+ 下面一行小路径框。
+        那个目录树在 per-user 包里**只有 LocalAppData\Programs\LinkX 一条**，
+        于是屏幕上是一个几乎空的大列表框 —— 用户看到的是"这安装器不会挑文件夹"，
+        看着别扭、也不敢用。改成像 LocalSend 那样：一行宽路径框（可直接改盘符）占主位，
+        下面一句话交代装到哪。路径改完照样装、卸载也照样找得回来
+        （靠上面那条 InstallDir 回读；下一页的 SetTargetPath 负责把改后的路径落到目录上）。
       -->
       <Dialog Id="InstallDirDlg" Width="370" Height="270" Title="[ProductName] 安装位置">
         <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0"/>
         <Control Id="Title" Type="Text" X="20" Y="15" Width="330" Height="18" Transparent="yes" NoPrefix="yes"
                  Text="安装位置"/>
         <Control Id="Description" Type="Text" X="20" Y="52" Width="330" Height="20" Transparent="yes" NoPrefix="yes"
-                 Text="选择要把 [ProductName] 装到哪个文件夹。"/>
-        <Control Id="DriveHint" Type="Text" X="20" Y="74" Width="330" Height="28" Transparent="yes" NoPrefix="yes"
-                 Text="想装到别的盘：直接在下面这行改盘符，例如 D:\LinkX。&#10;上面的列表只用来在同一个盘里翻文件夹。"/>
-        <Control Id="FolderList" Type="DirectoryList" X="20" Y="106" Width="330" Height="82" Sunken="yes"
+                 Text="您想将 [ProductName] 安装在哪个文件夹？"/>
+        <Control Id="PathEdit" Type="PathEdit" X="20" Y="78" Width="330" Height="18"
                  Property="WIXUI_INSTALLDIR" Indirect="yes"/>
-        <Control Id="PathLabel" Type="Text" X="20" Y="194" Width="330" Height="12" Transparent="yes" NoPrefix="yes"
-                 Text="安装到"/>
-        <Control Id="PathEdit" Type="PathEdit" X="20" Y="208" Width="330" Height="17"
-                 Property="WIXUI_INSTALLDIR" Indirect="yes"/>
+        <Control Id="InstallHint" Type="Text" X="20" Y="104" Width="330" Height="30" Transparent="yes" NoPrefix="yes"
+                 Text="安装程序将把 [ProductName] 安装到上面的文件夹。&#10;想装到别的盘，直接把路径改成 D:\LinkX 这样的完整路径即可。"/>
         <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0"/>
         <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="上一步">
           <Publish Event="NewDialog" Value="LicenseDlg"/>

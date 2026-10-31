@@ -1,3 +1,7 @@
+/**
+ * JNI 桥：Kotlin 侧调用 Rust 核心的唯一入口（对应 Crates/ffi/src/jni_bridge.rs）。
+ */
+
 package com.linkx.app
 
 import android.util.Log

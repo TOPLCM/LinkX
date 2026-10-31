@@ -447,7 +447,8 @@ def emit_assets(out, args):
         # 自检：生成的 XML 必须能解析。XML 一旦内联在 Python 字符串里，
         # 一次转义事故就能让全部图标不合法，却要等到 Gradle mergeDebugResources 才炸。
         ET.fromstring(vec)
-        with open(os.path.join(and_dir, fname), "w", encoding="utf-8") as f:
+        with open(os.path.join(and_dir, fname), "w", encoding="utf-8", newline="
+") as f:
             f.write(vec)
         written.append(fname)
         rust_lines.append(f"/// {name}（{rec['source']}）")
@@ -469,7 +470,8 @@ def emit_assets(out, args):
             continue
         rust_lines.append(f'    ("{name}", {name.upper()}_PATHS),')
     rust_lines.append("];")
-    with open("Platforms/Windows/src/icons_svg.rs", "w", encoding="utf-8") as f:
+    with open("Platforms/Windows/src/icons_svg.rs", "w", encoding="utf-8", newline="
+") as f:
         f.write("\n".join(rust_lines) + "\n")
     print(f"  安卓 vector：{len(written)} 个；Windows 表：icons_svg.rs")
 
@@ -499,7 +501,8 @@ def emit_assets(out, args):
             .replace("{PD}", pd)
         )
         ET.fromstring(launcher)
-        with open(os.path.join(and_dir, "ic_launcher.xml"), "w", encoding="utf-8") as f:
+        with open(os.path.join(and_dir, "ic_launcher.xml"), "w", encoding="utf-8", newline="
+") as f:
             f.write(launcher)
         print("  安卓启动图标：res/drawable/ic_launcher.xml 已重生成（与 LinkX.ico 同一份 logo 几何）")
     return out
@@ -540,7 +543,8 @@ def main():
         }
         print(f"  {logical:<10} {fname:<18} 子路径 {len(pts):>2}  采样点 {out[logical]['point_count']:>6}")
     os.makedirs("Temp", exist_ok=True)
-    with open("Temp/svg-assets.json", "w", encoding="utf-8") as f:
+    with open("Temp/svg-assets.json", "w", encoding="utf-8", newline="
+") as f:
         json.dump(out, f, ensure_ascii=False)
     print(f"已写 Temp/svg-assets.json（{len(out)} 个图标）")
 
@@ -566,7 +570,8 @@ def main():
 
     if args.emit:
         emit_assets(out, args)
-        with open("Temp/svg-assets.json", "w", encoding="utf-8") as f:
+        with open("Temp/svg-assets.json", "w", encoding="utf-8", newline="
+") as f:
             json.dump(out, f, ensure_ascii=False)
     return 0
 

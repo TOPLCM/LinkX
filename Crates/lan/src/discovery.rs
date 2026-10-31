@@ -394,10 +394,6 @@ impl UdpDiscovery {
         self.stats
     }
 
-    pub fn set_broadcast_interval(&mut self, interval: Duration) {
-        self.interval = interval;
-    }
-
     /// 追加单播目标（手动 IP 兜底 / 定向探测；广播不通时的可用路径）
     pub fn add_target(&mut self, addr: SocketAddr) {
         if !self.extra_targets.contains(&addr) {
@@ -745,7 +741,6 @@ mod tests {
     #[test]
     fn broadcast_is_throttled_by_interval() {
         let mut a = UdpDiscovery::bind_addr(loopback(0)).unwrap();
-        a.set_broadcast_interval(Duration::from_secs(3));
         let t0 = Instant::now();
         assert!(a.broadcast_if_due(&beacon("pc"), t0).unwrap().is_some());
         assert!(a

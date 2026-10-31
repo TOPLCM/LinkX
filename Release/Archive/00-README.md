@@ -49,8 +49,19 @@ Releases 页面下载 —— **一个版本一条**（v0.1.0 到 v0.4.5 各一�
 | 0.4.5 | Android | `LinkX-0.4.5-release.apk` | 2,428,134 | `26462226f016ab9ff73acf9c1e81b20417e58338a4bc4e0aa747c0d0da056275` |
 | 0.5.0 | Windows | `LinkX-0.5.0-x64.msi` | 626,688 | `cb9bebdc02f67719c4ce424f250d89e8749301de0b2252abb5237632979e8875` |
 | 0.5.0 | Android | `LinkX-0.5.0-release.apk` | 2,407,710 | `16383f369fa61adfd2e3e508034047d1bf94e50bc742860176c64227acf1e56b` |
+| 0.5.1 | Windows | `LinkX-0.5.1-x64.msi` | 1,048,576 | `4931e10e85cf4bc34f742397d2a49ff9b3c5f8ddb969cb8d5ea47269bf5dda79` |
+| 0.5.1 | Android | `LinkX-0.5.1-release.apk` | 2,399,518 | `ac83608ee0fe5c2cff1580fe2c33b182cb56a8769a4f16149006ebef22e24609` |
+| 0.5.2 | Windows | `LinkX-0.5.2-x64.msi` | 1,048,576 | `249266f2c3fd43bb5d5eab9df01d101bf9447b1b957548282efde91bae966a12` |
+| 0.5.2 | Android | `LinkX-0.5.2-release.apk` | 2,420,287 | `529217a5575069859a101e6df904731cc357ca5291425e17e543c46b4cc71460` |
+
+> ⚠ 0.5.1 这两份**本体没有进库**（换机时工具链与产物没跟着搬，本机上已无这两个文件）：
+> 校验值照旧登记在案，需要那一版的包时到 Releases 页面下载。
 
 ## 当前版本
 
-0.5.1 的产物与校验值见 [`../README.md`](../README.md)；逐版改了什么见
-[`../../CHANGELOG.md`](../../CHANGELOG.md)。
+0.5.2 是当前版本：它的产物与校验值见 [`../README.md`](../README.md)（那是本机构建机上的同一份），
+逐版改了什么见 [`../../CHANGELOG.md`](../../CHANGELOG.md)。
+
+这一版已经上架，所以安装包本体也归档在 `v0.5.2/` 里，跟其他版本一样入库 ——
+想拿这一版的包，`git clone` 后直接进 `v0.5.2/Windows/` 与 `v0.5.2/Android/` 取，
+或者到 Releases 页面下载 v0.5.2 那一条。

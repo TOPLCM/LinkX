@@ -1,9 +1,9 @@
-//! 传输抽象：TCP 帧通道 + BLE 角色桩。
-//! 接收侧统一走抗重放滑动窗口：已见 / 过旧 seq → `TransportError::Replay`
-//! （BLE 重组路径用 `check_frame_replay` 做同源校验）。
+//! 传输抽象：TCP 帧通道。
+//! 接收侧统一走抗重放滑动窗口：已见 / 过旧 seq → `TransportError::Replay`。
+//! 手动 IP 兜底的地址解析也收在这里（裸 IP 补默认 TCP 端口）。
 
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::Duration;
 
 use debuglog::Level;
@@ -32,11 +32,28 @@ pub enum TransportError {
     Eof,
     #[error("抗重放拒绝: {0}")]
     Replay(ReplayError),
+    #[error("手动地址非法: {0}")]
+    BadManualAddr(String),
 }
 
 impl From<std::io::Error> for TransportError {
     fn from(e: std::io::Error) -> Self {
         TransportError::Io(e.to_string())
+    }
+}
+
+/// 手动 IP 兜底：接受 `192.168.1.5`（默认 TCP 端口）或 `192.168.1.5:55676`
+pub fn parse_manual_addr(input: &str) -> Result<SocketAddr, TransportError> {
+    let text = input.trim();
+    if text.is_empty() {
+        return Err(TransportError::BadManualAddr("地址为空".into()));
+    }
+    if let Ok(addr) = text.parse::<SocketAddr>() {
+        return Ok(addr);
+    }
+    match text.parse::<std::net::IpAddr>() {
+        Ok(ip) => Ok(SocketAddr::new(ip, TRANSPORT_TCP_PORT)),
+        Err(_) => Err(TransportError::BadManualAddr(format!("无法解析 {text:?}"))),
     }
 }
 
@@ -134,7 +151,7 @@ impl TcpStreamLink {
         Ok(self.stream.peer_addr()?.to_string())
     }
 
-    /// 读一整帧但**不做**抗重放校验：`StreamLink` 以此实现「解密成功后才提交窗口」。
+    /// 读一整帧但**不做**抗重放校验：窗口何时提交由调用方决定（解密成功之后才提交）。
     pub fn read_frame(&mut self) -> Result<(FrameHeader, Vec<u8>), TransportError> {
         let mut head = [0u8; 13];
         if let Err(e) = read_exact_or_eof(&mut self.stream, &mut head) {
@@ -240,18 +257,6 @@ impl FrameChannel for TcpStreamLink {
     }
 }
 
-/// BLE 接收路径接入点：重组出整帧后调用，与 TCP 路径共用同一套滑动窗口语义。
-pub fn check_frame_replay(
-    window: &mut ReplayWindow,
-    frame: &[u8],
-) -> Result<FrameHeader, TransportError> {
-    let header = FrameHeader::parse(frame).map_err(TransportError::Frame)?;
-    window
-        .check_and_update(header.seq)
-        .map_err(TransportError::Replay)?;
-    Ok(header)
-}
-
 fn read_exact_or_eof<R: Read>(r: &mut R, buf: &mut [u8]) -> Result<(), TransportError> {
     let mut read = 0usize;
     while read < buf.len() {
@@ -275,21 +280,39 @@ pub mod BleUuid {
     pub const CHAR_EVT: &str = "4c584c02-0000-1000-8000-00805f9b34fb";
 }
 
-pub trait BleCentralReceiver {
-    fn on_connect(&mut self, peer: &str);
-}
-
-pub trait BlePeripheralSender {
-    fn notify(&mut self, payload: &[u8]) -> Result<(), TransportError>;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use linkx_protocol::msg_type::CLIPBOARD_PUSH;
+    use std::net::{IpAddr, Ipv4Addr};
 
     fn tag16() -> Vec<u8> {
         vec![0xEE; 16]
+    }
+
+    /// 手动兜底地址：裸 IP 补默认 TCP 端口，带端口则原样取用
+    #[test]
+    fn manual_addr_parsing() {
+        let a = parse_manual_addr(" 192.168.1.5 ").unwrap();
+        assert_eq!(
+            a,
+            SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5)),
+                TRANSPORT_TCP_PORT
+            )
+        );
+        let b = parse_manual_addr("192.168.1.5:60000").unwrap();
+        assert_eq!(b.port(), 60000);
+        let c = parse_manual_addr("::1").unwrap();
+        assert!(c.is_ipv6());
+        assert!(matches!(
+            parse_manual_addr(""),
+            Err(TransportError::BadManualAddr(_))
+        ));
+        assert!(matches!(
+            parse_manual_addr("not-an-ip"),
+            Err(TransportError::BadManualAddr(_))
+        ));
     }
 
     #[test]
@@ -399,25 +422,6 @@ mod tests {
             client.send_frame(hdr, &body).unwrap();
         }
         assert_eq!(server.join().unwrap(), (1, 2));
-    }
-
-    #[test]
-    fn ble_reassembled_frame_replay_hook() {
-        let hdr = FrameHeader::default_encrypted(CLIPBOARD_PUSH, 9, 1);
-        let mut body = vec![0x33];
-        body.extend_from_slice(&tag16());
-        let frame = linkx_protocol::frame::assemble_frame(&hdr, &body).unwrap();
-        let mut w = ReplayWindow::default();
-        assert_eq!(check_frame_replay(&mut w, &frame).unwrap(), hdr);
-        assert!(matches!(
-            check_frame_replay(&mut w, &frame),
-            Err(TransportError::Replay(ReplayError::Replay(9)))
-        ));
-        // 畸形帧不 panic
-        assert!(matches!(
-            check_frame_replay(&mut w, &[0u8; 3]),
-            Err(TransportError::Frame(_))
-        ));
     }
 
     #[test]

@@ -1,3 +1,5 @@
+/** 通知监听：把通知组装成事件交给核心转发（敏感来源默认不传正文）。 */
+
 package com.linkx.app
 
 import android.app.Notification

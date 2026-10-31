@@ -10,8 +10,8 @@
 
 use crate::engine::TrustedPeer;
 
-/// 指纹长度（SHA-256 前 8 字节 → 16 位小写 hex，与 `linkx_crypto::identity` 同源）
-pub const FINGERPRINT_HEX_LEN: usize = 16;
+/// 指纹长度（SHA-256 前 8 字节 → 16 位小写 hex；单源在 `linkx_crypto::identity`，这里只转出）
+pub use linkx_crypto::FINGERPRINT_HEX_LEN;
 
 /// 指纹合法性：16 位 ASCII hex（大小写均可，调用方负责折叠）
 pub fn is_valid_fingerprint(fp: &str) -> bool {

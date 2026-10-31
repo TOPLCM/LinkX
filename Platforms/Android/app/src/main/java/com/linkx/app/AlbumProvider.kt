@@ -1,3 +1,8 @@
+/**
+ * 相册访问：读系统相册里的照片/视频（只取 MediaStore 元信息，不搬图像字节），
+ * 给「从相册选图」用。
+ */
+
 package com.linkx.app
 
 import android.content.Context

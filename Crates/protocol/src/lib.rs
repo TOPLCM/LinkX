@@ -43,12 +43,6 @@ pub mod msg_type {
     /// 收端 → 发端「停止发送」。收端对一条正在进来的流没有别的掐断手段，只能显式回话；
     /// 发端的取消走 FILE_DONE{cancelled:true}，不另发明一条消息。
     pub const FILE_CANCEL: u8 = 0x33;
-    #[allow(dead_code)] // 预留，未启用
-    pub const MIRROR_FRAME: u8 = 0x40;
-    #[allow(dead_code)] // 预留，未启用
-    pub const MIRROR_CONTROL: u8 = 0x41;
-    #[allow(dead_code)] // 预留，未启用
-    pub const CALL_INCOMING: u8 = 0x50;
     /// 图片/视频互传：问与答各占一个类型，收到就知道是什么，不靠"谁才会发"去猜。
     /// 取原图的**回包走 FILE_\***，不另发明大数据通道。
     /// 这五条**只走局域网 TCP**，不许降级蓝牙——蓝牙分片通道传大块会静默丢 chunk 却看似完整。
@@ -65,6 +59,8 @@ pub mod msg_type {
     /// 手机设备状态（电量/充电中）。与媒体状态同一类"手机现在怎么样"的小标量，
     /// 只在变化时发一次，不做周期性心跳。
     pub const DEVICE_STATUS: u8 = 0x82;
+    // 0x40 / 0x41 / 0x50 曾规划过（镜像帧 / 镜像控制 / 来电提醒），现已整条撤除。
+    // 这三个号位不许复用：装过那些测试包的机器还在，复用同一个号就等于让它有两种解释。
     // 0x83 只在测试版里做过 MEDIA_COVER（媒体封面），现已整条撤除。这个号位不许复用：
     // 装过那份测试包的机器还在，复用同一个号就等于让它有两种解释。
     pub const ERROR: u8 = 0xFF;
@@ -160,9 +156,10 @@ mod tests {
             v1.len() + 1,
             "is_v1 与测试表不再一一对应（+1 是 HEARTBEAT）：实际 {accepted}"
         );
-        // 预留消息不在首发集合内
-        assert!(!msg_type::is_v1(msg_type::MIRROR_FRAME));
-        assert!(!msg_type::is_v1(msg_type::CALL_INCOMING));
+        // 号位保留：曾规划过、已整条撤除的镜像 / 来电提醒消息不在首发集合内
+        for reserved in [0x40u8, 0x41, 0x50] {
+            assert!(!msg_type::is_v1(reserved));
+        }
     }
 
     #[test]

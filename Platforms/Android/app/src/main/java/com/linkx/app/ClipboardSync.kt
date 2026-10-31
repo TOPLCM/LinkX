@@ -1,3 +1,7 @@
+/**
+ * 剪贴板同步（纯文本）：本机复制推给对端，收到对端的写回本机。
+ */
+
 package com.linkx.app
 
 import android.content.ClipData

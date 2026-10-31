@@ -23,12 +23,28 @@ BAD_PATS=(linkx-debugd nativeDebugdStart nativeDebugTakeRequest nativeDebugSetFi
   nativeDebugCounter nativeDebugAddRequestLimit serde_json 'LocalSend' 'localsend')
 # classes.dex 专用：Kotlin 侧的 `external fun nativeDebug*` 是 JNI 入口，proguard 必须 keep，
 # R8 删不掉；它们出现在 dex 里不代表调试面能起来。这一层只查真正会跑起来的东西。
-BAD_PATS_DEX=(linkx-debugd serde_json 'LocalSend' 'localsend')
+BAD_PATS_DEX=(linkx-debugd serde_json)
+# 许可署名例外：Apache-2.0 §4(b)/(d) 要求随分发附带的上游署名与改动声明里写出上游项目名，
+# 所以「关于」页的清单条目与那三个许可文件名里必然出现 LocalSend / localsend。
+# 判据不是"出现即失败"，而是"**只允许出现这些字面量**"——期望次数从下面这份清单推导，
+# 实际次数从产物里数，两者必须相等：多一次就是别处混进了 LocalSend（这道门禁要防的正是它），
+# 少一次说明这份 APK 没带上应有的署名。清单外的任何写法一律红。
+ALLOWED_ATTRIBUTION=(
+  'LICENSE-localsend.txt'
+  'NOTICE-localsend.txt'
+  'PORTING-localsend.md'
+  'LocalSend 移植件许可（Apache-2.0）'
+  'LocalSend 上游署名'
+  'LocalSend 移植范围与改动声明'
+)
 
 fail=0
 
-scan() { # scan <文件> <反向断言串> <说明> [模式数组名，默认 BAD_PATS]
-  local f="$1" must="$2" label="$3" patvar="${4:-BAD_PATS[@]}"
+scan() { # scan <文件> <反向断言串> <说明> [模式…，默认 BAD_PATS]
+  local f="$1" must="$2" label="$3"
+  shift 3 2>/dev/null || true
+  local -a pats=("$@")
+  [ ${#pats[@]} -gt 0 ] || pats=("${BAD_PATS[@]}")
   echo "== 交付构建零调试残留：$label =="
   [ -f "$f" ] || { echo "❌ 找不到产物 $f"; fail=1; return; }
 
@@ -45,13 +61,14 @@ scan() { # scan <文件> <反向断言串> <说明> [模式数组名，默认 BA
   has() { grep -q "$1" "$dump"; }
 
   local bad=0
-  for pat in "${!patvar}"; do
+  local pat
+  for pat in "${pats[@]}"; do
     if has "$pat"; then
       echo "  ✗ 命中调试残留：$pat"
       bad=1
     fi
   done
-  [ "$bad" = 0 ] && echo "  ✓ 无控制面符号 / 路由串 / serde_json / LocalSend 字样"
+  [ "$bad" = 0 ] && echo "  ✓ 未命中禁用模式（${pats[*]}）"
 
   # 反向断言：产品该有的东西必须在（扫错文件、或产物是旧的，都在这一步露出来）
   if has "$must"; then
@@ -84,6 +101,45 @@ feature_gate() {
   fi
 }
 
+# 计数：产物里某字面量出现的次数。跑在原始字节上，不跑在"可打印串"视图上 ——
+# 后者会把非打印字节删掉再拼接，于是两个本不相邻的串可能被凑成一次假命中。
+count_occ() { # count_occ <字面量> <文件>
+  { LC_ALL=C grep -ao -- "$1" "$2" 2>/dev/null || true; } | wc -l | tr -d ' '
+}
+
+# 署名例外判据：只统计 APK 的**代码层**（dex + 资源表），
+# 许可正文本身（assets 与安装目录里的那几份文件）当然写着上游项目名，那是义务、不是残留。
+attribution_gate() { # attribution_gate <APK>
+  local apk="$1" dir="Temp/release-clean-attribution"
+  rm -rf "$dir"; mkdir -p "$dir"
+  unzip -o -q "$apk" 'classes*.dex' 'resources.arsc' -d "$dir" 2>/dev/null || true
+  local files
+  files="$(find "$dir" -type f)"
+  if [ -z "$files" ]; then
+    echo "  ✗ APK 里取不到 dex / 资源表，无法核验许可署名"
+    fail=1; return
+  fi
+  local want_ls want_lsend got_ls got_lsend
+  want_ls="$(printf '%s\n' "${ALLOWED_ATTRIBUTION[@]}" | { LC_ALL=C grep -ao 'LocalSend' || true; } | wc -l | tr -d ' ')"
+  want_lsend="$(printf '%s\n' "${ALLOWED_ATTRIBUTION[@]}" | { LC_ALL=C grep -ao 'localsend' || true; } | wc -l | tr -d ' ')"
+  got_ls=0; got_lsend=0
+  local f
+  for f in $files; do
+    got_ls=$((got_ls + $(count_occ 'LocalSend' "$f")))
+    got_lsend=$((got_lsend + $(count_occ 'localsend' "$f")))
+  done
+  rm -rf "$dir"
+  if [ "$got_ls" != "$want_ls" ] || [ "$got_lsend" != "$want_lsend" ]; then
+    echo "  ✗ 代码层里的 LocalSend/localsend 次数对不上许可署名清单"
+    echo "     LocalSend  期望 $want_ls 次，实际 $got_ls 次"
+    echo "     localsend  期望 $want_lsend 次，实际 $got_lsend 次"
+    echo "     多出来的是混进来的上游实现，少掉的是该随包走的署名"
+    fail=1
+  else
+    echo "  ✓ 代码层只有许可署名清单里的 LocalSend/localsend（$got_ls / $got_lsend 次）"
+  fi
+}
+
 # 反向断言用的"这一版该有的符号"。默认按当前交付构建；**复核历史归档产物时要能换**：
 # 媒体指令是 0.4.0 才有的，拿它去断言 0.1.0~0.3.0 的 APK 只会得到一条假的红。
 MUST_SO="${LINKX_MUST_SYMBOL:-Java_com_linkx_app_NativeCore_nativeSendMediaState}"
@@ -107,7 +163,7 @@ if [ "${1:-}" = "--apk-so" ]; then
   # runCatching 兜住 UnsatisfiedLinkError），不要求 dex 连名字都不许出现。
   DEX="Temp/release-clean-classes.dex"
   if unzip -p "$APK" "classes.dex" > "$DEX" 2>/dev/null; then
-    scan "$DEX" "$MUST_DEX" "APK 内 classes.dex（$APK）" BAD_PATS_DEX[@]
+    scan "$DEX" "$MUST_DEX" "APK 内 classes.dex（$APK）" "${BAD_PATS_DEX[@]}"
     if grep -aq 'debugdAvailable = true' "$DEX"; then
       echo "  ✗ classes.dex 里有把调试面判为可用的赋值"
       fail=1
@@ -117,6 +173,7 @@ if [ "${1:-}" = "--apk-so" ]; then
     fail=1
   fi
   rm -f "$DEX"
+  attribution_gate "$APK"
 else
   EXES=("$@")
   [ ${#EXES[@]} -gt 0 ] || EXES=("Target/x86_64-pc-windows-gnu/release/linkx.exe")

@@ -1,3 +1,7 @@
+/**
+ * 电量与充电态：只注册一次系统广播，之后热路径只读缓存值。
+ */
+
 package com.linkx.app
 
 import android.content.BroadcastReceiver

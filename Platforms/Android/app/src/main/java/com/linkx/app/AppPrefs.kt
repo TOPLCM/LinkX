@@ -1,3 +1,7 @@
+/**
+ * 应用设置：深浅色模式与剪贴板开关等，落在同一个 SharedPreferences 文件里。
+ */
+
 package com.linkx.app
 
 import android.content.Context

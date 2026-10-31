@@ -1,3 +1,7 @@
+/**
+ * 功能开关：哪些能力开着（与 Windows 端 features.rs 同一套语义）。
+ */
+
 package com.linkx.app
 
 import android.content.Context

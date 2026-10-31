@@ -1,49 +1,35 @@
 #!/usr/bin/env bash
 # Windows 安装包（.msi）构建 —— 交叉编译 linkx.exe + 打 MSI。
-# Linux 宿主只能走 wixl（msitools）；Windows 宿主走 WiX Toolset，正式包由这条链路出。
-
+# 打包引擎只有一条：**WiX Toolset v5**（`Platforms/Windows/installers/LinkX-v4.wxs`）。
+# 原先还有一条 Linux/wixl 链路（配 `installers/LinkX.wxs`），那份源自陈"携带 6 处已知向导缺陷"、
+# 从未在真机上走过安装向导，开源前已随它一起下线（见 `内部文档/计划.md`）。
+#
 # 流程：环境检查 → 交叉编译 linkx.exe → 注入版本生成 .wxs → 打包 msi → 静态校验 → 归档
 # 产物：<OUT_DIR>/LinkX-<version>-x64.msi(.sha256)   （OUT_DIR 默认 Release/Windows）
-
 # 用法：bash Scripts/build-msi-windows.sh
-# 可调环境变量：
-#   SKIP_EXE_BUILD=1              复用已有 exe（不重新交叉编译，便于调试/CI）
-#   OUT_DIR=<dir>                 交付产物目录（默认 Release/Windows）
-#   MSI_ENGINE=auto|wixl|wix      打包引擎（默认 auto，按宿主判定）
-#   WIX_V4_WXS=<file>             选 wix 引擎时的 WiX v4/v5 源文件
-
-# 为什么默认 wixl、WiX 在非 Windows 上卡在哪：见两个 .wxs 的头部注释；
-# MSI_ENGINE=wix 分支留给 Windows 宿主用完整 WiX Toolset 出正式包。
+# 可调环境变量：SKIP_EXE_BUILD=1（复用已有 exe）/ OUT_DIR=<dir>（产物目录）/ WIX_V4_WXS=<file>（换 .wx）
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 SKIP_EXE_BUILD="${SKIP_EXE_BUILD:-0}"
 OUT_DIR="${OUT_DIR:-Release/Windows}"
-MSI_ENGINE="${MSI_ENGINE:-auto}"
 EXE="Target/x86_64-pc-windows-gnu/release/linkx.exe"
 
 die() { echo "❌ $*" >&2; exit 1; }
 
 echo "== 1) 环境检查 =="
-# wixl / msiinfo / msiextract 是 Linux 专有，WiX Toolset 反过来在非 Windows 上产不出 MSI：
-# 无条件要求 msitools 三件套，这个脚本在 Windows 宿主第一步就会失败。
-ON_WINDOWS=0
-case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*|Windows*) ON_WINDOWS=1 ;; esac
-if [ "$MSI_ENGINE" = "auto" ]; then
-  if [ "$ON_WINDOWS" = "1" ]; then MSI_ENGINE=wix; else MSI_ENGINE=wixl; fi
-  echo "  宿主判定 = $([ "$ON_WINDOWS" = 1 ] && echo Windows || echo Linux)，引擎自动选 $MSI_ENGINE"
-fi
-if [ "$MSI_ENGINE" != "wix" ]; then
-  for t in wixl msiinfo msiextract; do
-    command -v "$t" >/dev/null || die "缺 $t（Debian/Ubuntu: apt install msitools wixl wixl-data）"
-  done
-fi
+# WiX Toolset 反过来在非 Windows 上产不出 MSI，故这条链路只在 Windows 宿主上跑。
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*|Windows*) ;;
+  *) die "MSI 只在 Windows 宿主上构建（WiX Toolset 在 Linux 上产不出 MSI）；请用 Windows 机器或 CI 的 windows job" ;;
+esac
+command -v wix >/dev/null || die "未找到 wix（dotnet tool install --tool-path LOCAL_WIX/wix-5.0.2 wix --version 5.0.2）"
 if [ "$SKIP_EXE_BUILD" != "1" ]; then
   command -v x86_64-w64-mingw32-gcc >/dev/null \
     || die "缺 MinGW 交叉编译器（Debian/Ubuntu: apt install mingw-w64）"
 fi
-echo "  工具链就绪（引擎 $MSI_ENGINE）"
+echo "  工具链就绪（引擎 wix）"
 
 echo
 echo "== 2) 交叉编译 Windows 壳（release） =="
@@ -60,14 +46,9 @@ echo "== 3) 生成 .wxs（注入版本） =="
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 [ -n "$VERSION" ] || die "无法从 Cargo.toml 读取版本号"
 mkdir -p Target/msi
-# 两个引擎吃各自方言的源，不可混用：自定义向导只在 v4 源里是完整的
-if [ "$MSI_ENGINE" = "wix" ]; then
-  WXS_SRC="${WIX_V4_WXS:-Platforms/Windows/installers/LinkX-v4.wxs}"
-  WXS_GEN="Target/msi/LinkX-v4.wxs"
-else
-  WXS_SRC="Platforms/Windows/installers/LinkX.wxs"
-  WXS_GEN="Target/msi/LinkX.wxs"
-fi
+# 只有一份安装源：自定义向导（中文）完整，只有它出正式包
+WXS_SRC="${WIX_V4_WXS:-Platforms/Windows/installers/LinkX-v4.wxs}"
+WXS_GEN="Target/msi/LinkX-v4.wxs"
 [ -f "$WXS_SRC" ] || die "找不到 .wxs 源：$WXS_SRC"
 sed "s/@VERSION@/$VERSION/g" "$WXS_SRC" > "$WXS_GEN"
 echo "  版本 $VERSION：$WXS_SRC → $WXS_GEN"
@@ -75,23 +56,13 @@ echo "  版本 $VERSION：$WXS_SRC → $WXS_GEN"
 echo
 echo "== 4) 打包 MSI（x64） =="
 OUT="Target/msi/LinkX-$VERSION-x64.msi"
-case "$MSI_ENGINE" in
-  wix)
-    command -v wix >/dev/null || die "未找到 wix（dotnet tool install -g wix）"
-    echo "  引擎 = WiX Toolset（构建已注入版本的 $WXS_GEN）"
-    # -ext 带 util 扩展（CloseApplication 只有它有）。优先指到本机磁盘上那份（LOCAL_WIX/ 是安装副本，
-    # 不入库）：只写包名时 WiX 会去 NuGet 现取现装进 ~/.wix/extensions，出包这一步就悄悄依赖网络。
-    UTIL_EXT="$(ls LOCAL_WIX/extensions/WixToolset.Util.wixext/*/wixext5/WixToolset.Util.wixext.dll 2>/dev/null | head -1)"
-    [ -n "$UTIL_EXT" ] || UTIL_EXT=WixToolset.Util.wixext
-    wix build "$WXS_GEN" -arch x64 -ext "$UTIL_EXT" -o "$OUT"
-    ;;
-  wixl)
-    echo "  引擎 = wixl（msitools；Linux 原生链路）"
-    # 注意：必须带 --ext ui，否则 wixl 不会创建 Dialog/Control 表（自定义向导会丢失）
-    wixl --ext ui -a x64 -o "$OUT" "$WXS_GEN"
-    ;;
-  *) die "未知 MSI_ENGINE: $MSI_ENGINE（可选 auto|wixl|wix）" ;;
-esac
+command -v wix >/dev/null || die "未找到 wix（dotnet tool install -g wix）"
+echo "  引擎 = WiX Toolset（构建已注入版本的 $WXS_GEN）"
+# -ext 带 util 扩展（CloseApplication 只有它有）。优先指到本机磁盘上那份（LOCAL_WIX/ 是安装副本，
+# 不入库）：只写包名时 WiX 会去 NuGet 现取现装进 ~/.wix/extensions，出包这一步就悄悄依赖网络。
+UTIL_EXT="$(ls LOCAL_WIX/extensions/WixToolset.Util.wixext/*/wixext5/WixToolset.Util.wixext.dll 2>/dev/null | head -1)"
+[ -n "$UTIL_EXT" ] || UTIL_EXT=WixToolset.Util.wixext
+wix build "$WXS_GEN" -arch x64 -ext "$UTIL_EXT" -o "$OUT"
 echo "  ✅ $OUT"
 
 echo
@@ -99,87 +70,29 @@ echo "== 5) 静态校验 =="
 # 必须在这里真的执行：只在文档里写"记得跑一次"等于没有门禁
 bash Scripts/check-release-clean.sh "$EXE"
 # 卸载/升级前的退出保护：漏了它不报错，卸载照样返回成功而本体还在跑，故按表校验
-if [ "$MSI_ENGINE" = "wix" ] && command -v powershell >/dev/null 2>&1; then
+if command -v powershell >/dev/null 2>&1; then
   echo "  --- CloseApplication（卸载/升级前先退出程序）表级校验 ---"
   MSI_W="$OUT"
   command -v cygpath >/dev/null 2>&1 && MSI_W="$(cygpath -w "$OUT")"
   powershell -NoProfile -ExecutionPolicy Bypass \
     -File "$(command -v cygpath >/dev/null 2>&1 && cygpath -w Scripts/check-msi-uninstall.ps1 || echo Scripts/check-msi-uninstall.ps1)" \
     -Msi "$MSI_W" || die "卸载前的退出保护没进包，见上面的 FAIL 行"
-elif [ "$MSI_ENGINE" = "wix" ]; then
-  echo "  ⚠️ 本机无 powershell，CloseApplication 表级校验跳过（Linux 侧 wixl 方言没这条保护）"
-fi
-# msitools 是 Linux 专有、msidump 只给首列，两者不等价，故不做"看起来一样"的替换：
-# 缺工具时改跑 ICE + 表存在性。安装器一律以真机 msiexec 走查为验收手段。
-if ! command -v msiinfo >/dev/null 2>&1; then
-  echo "  ⚠️ 本机无 msiinfo/msiextract（msitools 为 Linux 专有），以下 Linux 侧契约校验跳过："
-  echo "     per-user Directory 树挂载 / RemoveFile 条目 / CAB 回环逐字节"
-  echo "     → 由真机安装走查覆盖（安装→改选→卸载三回环 + 落盘/注册表/快捷方式核对）"
-  echo "  --- wix msi validate（ICE 全量） ---"
-  wix msi validate "$OUT" || echo "  （上列为 ICE 告警/错误，需逐条判定；已知 ICE20 是有意保留的缺口）"
-  MD="Target/msi-probe/msidump/bin/Debug/net8.0/win-x64/msidump.exe"
-  if [ -x "$MD" ]; then
-    echo "  --- 关键表存在性（msidump） ---"
-    TB="$("$MD" "$OUT" --tables | tr '\n' ' ')"
-    for t in File Directory Component Feature Media Property Registry RemoveFile CustomAction \
-             Dialog Control ControlEvent ControlCondition InstallExecuteSequence InstallUISequence Upgrade Icon; do
-      echo "$TB" | grep -qw "$t" || die "MSI 缺表：$t"
-    done
-    echo "  ✅ 关键表齐备（含自定义向导 UI 表）"
-    "$MD" "$OUT" "SELECT * FROM CustomAction" | sed -n '1,6p'
-  else
-    echo "  ⚠️ 未找到 msidump（$MD），表存在性也未校验 —— 完全依赖真机走查"
-  fi
 else
-msiinfo suminfo "$OUT" | sed -n '1,12p'
-echo "  --- tables ---"
-msiinfo tables "$OUT" | tr '\n' ' '
-echo
-for t in File Directory Component Feature Media Property Registry RemoveFile CustomAction Shortcut \
-         Dialog Control ControlEvent ControlCondition InstallExecuteSequence InstallUISequence Upgrade Icon; do
-  msiinfo tables "$OUT" | grep -qx "$t" || die "MSI 缺表：$t"
-done
-echo "  ✅ 关键表齐备（含自定义向导 UI 表）"
-
-echo "  --- per-user 校验（不得出现 ALLUSERS，目录须落在 LocalAppData） ---"
-if msiinfo export "$OUT" Property | grep -q "^ALLUSERS"; then
-  die "出现 ALLUSERS（不是 per-user 安装）"
+  echo "  ⚠️ 本机无 powershell，CloseApplication 表级校验跳过"
 fi
-msiinfo export "$OUT" Directory | grep -qE "^INSTALLFOLDER[[:space:]]+ProgramsFolder" \
-  || die "INSTALLFOLDER 未挂在 ProgramsFolder 下（每用户目录）"
-msiinfo export "$OUT" Directory | grep -qE "^ProgramsFolder[[:space:]]+LocalAppDataFolder" \
-  || die "ProgramsFolder 未挂在 LocalAppDataFolder 下"
-echo "  ✅ per-user：无 ALLUSERS，安装目录 = [LocalAppDataFolder]Programs\\LinkX"
-
-echo "  --- 自定义动作校验（防火墙，类型 50 = ExeCommand + Property） ---"
-msiinfo export "$OUT" CustomAction | awk -F'\t' '$1=="FwAdd"||$1=="FwDel"{print "  "$1" type="$2" source="$3}'
-for a in FwAdd FwDel; do
-  msiinfo export "$OUT" CustomAction | awk -F'\t' -v a="$a" '$1==a{found=1} END{exit !found}' \
-    || die "CustomAction 缺 $a"
-done
-msiinfo export "$OUT" CustomAction | grep -q 'advfirewall firewall add rule name="LinkX"' \
-  || die "FwAdd 命令行不正确"
-# 删除必须带过滤条件：光 `name="LinkX"` 会把机器上所有同名规则一起删（netsh 的语义）
-msiinfo export "$OUT" CustomAction | grep -q 'delete rule name="LinkX" protocol=TCP localport=55676 dir=in' \
-  || die "FwDel 命令行不正确（缺 protocol/localport/dir 过滤，会误删他人同名规则）"
-msiinfo export "$OUT" Property | grep -q '^NETSH_EXE.*netsh\.exe' \
-  || die "缺 NETSH_EXE 属性（类型 50 需指向 netsh.exe 全路径）"
-
-echo "  --- 卸载清残留校验 ---"
-for rf in RemoveInstallFolder RemoveProgramMenuDir; do
-  msiinfo export "$OUT" RemoveFile | grep -q "$rf" || die "RemoveFile 缺 $rf"
-done
-echo "  ✅ RemoveFile（安装目录 + 开始菜单目录）/ 组件内 Registry 由标准动作自动清除"
-
-echo "  --- 回环解包（文件须与源逐字节一致） ---"
-TMP="$(mktemp -d)"
-msiextract -C "$TMP" "$OUT" >/dev/null
-# msiextract 以 LocalAppDataFolder 为根展开 → 实际落在 <TMP>/Programs/LinkX/linkx.exe
-EXTRACTED="$(find "$TMP" -name linkx.exe -print -quit)"
-[ -n "$EXTRACTED" ] || die "回环解包未找到 linkx.exe"
-cmp "$EXTRACTED" "$EXE" || die "回环解包的 linkx.exe 与源不一致"
-echo "  ✅ linkx.exe 回环一致（$(stat -c%s "$EXTRACTED") B；解包路径 ${EXTRACTED#"$TMP"/}）"
-rm -rf "$TMP"
+echo "  --- wix msi validate（ICE 全量） ---"
+wix msi validate "$OUT" || echo "  （上列为 ICE 告警/错误，需逐条判定；已知 ICE20 是有意保留的缺口）"
+# 表级契约（per-user 挂载 / 卸载清理 / 防火墙动作 / 版本号）原先只挂在 Linux/wixl 那条链路上，
+# 而那条链路已经下线 —— 改用 Windows Installer 自带的 COM API 补回来，不依赖任何额外工具。
+if command -v powershell >/dev/null 2>&1; then
+  echo "  --- 表级契约校验（Windows Installer COM） ---"
+  MSI_W="$OUT"
+  command -v cygpath >/dev/null 2>&1 && MSI_W="$(cygpath -w "$OUT")"
+  powershell -NoProfile -ExecutionPolicy Bypass \
+    -File "$(command -v cygpath >/dev/null 2>&1 && cygpath -w Scripts/check-msi-tables.ps1 || echo Scripts/check-msi-tables.ps1)" \
+    -Msi "$MSI_W" -Version "$VERSION" || die "MSI 表级契约不满足，见上面的 FAIL 行"
+else
+  echo "  ⚠️ 本机无 powershell，表级契约校验跳过"
 fi
 
 echo

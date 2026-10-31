@@ -71,8 +71,12 @@ impl Module {
     }
 
     /// 稳定的 ASCII 标识：控制面 `/state` 的 JSON 键与 `/action/feature?module=` 的取值。刻意不用中文名或位序 ——
-    /// 那会让自动化脚本随文案/顺序一起碎。`allow(dead_code)`：唯一调用方是 `agent-debug` 控制面，交付构建不带该 feature
-    #[allow(dead_code)]
+    /// 那会让自动化脚本随文案/顺序一起碎。
+    ///
+    /// **只在调试面存在**：唯一调用方是 `agent-debug` 控制面（单测也要它），交付构建不带该 feature，
+    /// 于是这个函数在交付构建里压根不存在 —— 由编译器保证"它只在调试面有"，而不是靠
+    /// `allow(dead_code)` 掩盖"其实没人用"。
+    #[cfg(any(test, feature = "agent-debug"))]
     pub(crate) fn key(self) -> &'static str {
         match self {
             Module::Notifications => "notifications",
@@ -83,7 +87,8 @@ impl Module {
         }
     }
 
-    #[allow(dead_code)]
+    /// 标识反查：与 [`Module::key`] 同一套门控（控制面 + 单测；交付构建里不存在）
+    #[cfg(any(test, feature = "agent-debug"))]
     pub(crate) fn from_key(s: &str) -> Option<Module> {
         ALL.iter().find(|m| m.key() == s.trim()).copied()
     }

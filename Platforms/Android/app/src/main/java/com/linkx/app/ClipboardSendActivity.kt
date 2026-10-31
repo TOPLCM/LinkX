@@ -1,3 +1,8 @@
+/**
+ * 透明 Activity：给常驻通知的「发送剪贴板」借一次输入焦点
+ * （Android 10+ 只有当前持焦点的应用能读剪贴板）。
+ */
+
 package com.linkx.app
 
 import android.app.Activity

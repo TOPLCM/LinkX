@@ -11,6 +11,5 @@ debuglog.workspace = true
 linkx-protocol.workspace = true
 linkx-crypto.workspace = true
 thiserror.workspace = true
-hmac.workspace = true
 sha2.workspace = true
 prost.workspace = true

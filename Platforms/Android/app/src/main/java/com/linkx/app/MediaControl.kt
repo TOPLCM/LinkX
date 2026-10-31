@@ -1,3 +1,5 @@
+/** 媒体控制：手机在放什么推给电脑，电脑点按钮手机执行（只读媒体会话元数据，不搬音频）。 */
+
 package com.linkx.app
 
 import android.content.Context
@@ -17,14 +19,13 @@ import java.util.concurrent.atomic.AtomicInteger
  * 媒体控制：手机在放什么 → 推给电脑；电脑点按钮 → 手机执行。
  * 只读系统 MediaSession 的元数据与播放状态，**不搬运音频**、不引第三方库。
  *
- * 依赖通知监听权限：`getActiveSessions()` 要求调用方是已启用的
- * NotificationListenerService（系统硬约束）。"媒体控制用不了"多半是通知权限没给，
- * 界面必须把这句说明白，别让用户以为蓝牙坏了（[lastSkip] 就是干这个的）。
+ * 依赖通知监听权限：`getActiveSessions()` 要求调用方是已启用的 NotificationListenerService
+ * （系统硬约束）。"媒体控制用不了"多半是通知权限没给，界面必须把这句说明白，
+ * 别让用户以为蓝牙坏了（[lastSkip] 就是干这个的）。
  *
  * 线程：采样与指令执行都在本模块自己的单线程 executor，绝不进 [LinkxRuntime] 的
- * `@Synchronized` 路径——`getActiveSessions` 是跨进程 Binder 调用，个别机型几十毫秒起步，
- * 锁内执行会按住全局锁，BLE 分片、TCP 帧、所有 JNI 一起停摆。池内串行，故结果字段用
- * @Volatile 就够；只有节流基准 [lastAt] 由 tick 调用线程与池两头写。
+ * `@Synchronized` 路径 —— `getActiveSessions` 是跨进程 Binder 调用，个别机型几十毫秒起步，
+ * 锁内执行会按住全局锁，BLE 分片、TCP 帧、所有 JNI 一起停摆。
  */
 object MediaControl {
 
@@ -174,8 +175,7 @@ object MediaControl {
         val speed = state?.let { if (it.playbackSpeed > 0f) it.playbackSpeed else 1.0f } ?: 1.0f
         val volume = mediaVolumePercent(ctx)
         val pkg = controller.packageName.orEmpty()
-        // 签名**必须含音量**：不含时电脑改了音量手机却判"未变化"不推。不含进度：进度每时每刻
-        // 都在变，含进去等于每轮都"变了"，窄口会被心跳自己挤满。
+        // 签名**必须含音量**：不含时电脑改了音量手机却判"未变化"不推。不含进度：进度每时每刻都在变，含进去等于每轮都"变了"，窄口会被心跳自己挤满。
         val sig = "$pkg|$title|$artist|$album|$playing|$duration|${(speed * 100).toInt()}|$volume"
         return Snap(
             sig,
@@ -339,8 +339,7 @@ object MediaControl {
         val am = ctx.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return -1
         val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
         if (max <= 0) return -1
-        // -1 专门表示"读不到"，与"真的是 0%"分开。音乐流未激活时的假 0 只在没播放时出现，
-        // 电脑端用 `volume > 0 || playing` 判掉即可，不必在手机上添一个猜得更差的判据。
+        // -1 专门表示"读不到"，与"真的是 0%"分开。音乐流未激活时的假 0 只在没播放时出现，电脑端用 `volume > 0 || playing` 判掉即可，不必在手机上添一个猜得更差的判据。
         return (am.getStreamVolume(AudioManager.STREAM_MUSIC) * 100 + max / 2) / max
     }
 

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "LinkX FFI 边界：C ABI (linkx_core) + TX 事件队列（4.9 / I4，三条铁律）"
+description = "LinkX Core 公共面：版本常量（跨端单一真源）+ Android JNI 导出（构建 linkx_core.so）"
 
 [lib]
 name = "linkx_core"

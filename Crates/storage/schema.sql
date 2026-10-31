@@ -38,11 +38,3 @@ CREATE TABLE IF NOT EXISTS config (
   updated_at INTEGER NOT NULL,
   sync_scope TEXT NOT NULL          -- local | cross | per_peer（3.9）
 );
-
-CREATE TABLE IF NOT EXISTS message_log (
-  msg_id      BLOB NOT NULL,
-  msg_type    INTEGER NOT NULL,
-  payload_ref TEXT,                 -- 仅 debug build（4.7 环形日志）
-  ts          INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_message_log_ts ON message_log(ts);

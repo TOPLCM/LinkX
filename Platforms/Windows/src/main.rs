@@ -180,7 +180,7 @@ fn main() {
         let path = p.to_string_lossy().to_string();
         let mut st = shared.lock().unwrap();
         st.send_path_input = path.clone();
-        st.send_file_req = true;
+        st.send_file_req = Some(vec![path.clone()]);
         say(format!("[LinkX] 启动参数文件已排队: {path}"));
     }
     // 点按钮时 LinkX 已经退出过：这一份全新状态里没有那张卡的令牌，如实按"过期"报给用户

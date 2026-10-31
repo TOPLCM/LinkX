@@ -18,4 +18,3 @@ linkx-lan.workspace = true
 linkx-storage.workspace = true
 linkx-ffi.workspace = true
 prost.workspace = true
-hex.workspace = true

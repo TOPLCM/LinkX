@@ -1,7 +1,8 @@
 //! TLV 常量定义：常量单源（本文件），禁止在别处重复定义。
 //! 结构：`tag(1B) | len(1B) | value(lenB)` 连续排列，无嵌套；适用 HELLO / CHALLENGE /
 //! REPLY / PAIR_CONFIRM / PAIR_DONE / PING / PONG 等 <=64B 控制消息。
-//! 跨端对齐：Kotlin 侧（Platforms/Android/app/.../Tlv.kt）必须与此文件逐项一致。
+//! 跨端对齐：Kotlin 侧（Platforms/Android/app/src/main/java/com/linkx/app/Tlv.kt）
+//! 必须与此文件逐项一致。
 //! PING/PONG 用 TLV payload tag 区分而非 flags 位——flags 8 位已全部占用（bit7=JSON debug）。
 //! Channel Binding：`MSG_CHANNEL_BIND` 携带 nonce_tcp 与签名，把 TCP 会话绑定到 BLE 已配对
 //! 设备；`TAG_BIND_TAG` = `HMAC(channel_bind_key, nonce_tcp)` 截断（派生见

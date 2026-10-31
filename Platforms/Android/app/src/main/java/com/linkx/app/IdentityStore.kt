@@ -1,3 +1,7 @@
+/**
+ * 本机身份：长期私钥用 Android Keystore 加密后落盘，指纹由此派生。
+ */
+
 package com.linkx.app
 
 import android.content.Context

@@ -400,6 +400,19 @@ pub(crate) enum HitTarget {
     NotifyScroll(usize),
 }
 
+/// 设置页开关行 → 目标（**唯一真源**）。行与目标的对应只写这一处：命中判定（`region_at`）
+/// 与绘制侧的高亮都从这里取 —— 以前两边各写一遍行号，改行序时很容易只改一处
+/// （"点开关拨的是隔壁那一行"）。行序由 `SET_AUTOSTART_ROW` / `SET_DEBUG_ROW` 约定。
+#[cfg(windows)]
+const SET_SWITCH_TARGETS: [HitTarget; SET_TOGGLES] = [
+    HitTarget::ToggleToast,
+    HitTarget::ToggleToastContent,
+    HitTarget::ToggleClipSync,
+    HitTarget::ToggleAutoConnect,
+    HitTarget::ToggleAutostart,
+    HitTarget::ToggleDebug,
+];
+
 // ---------- 几何（绘制与命中同源；入参为逻辑坐标，返回物理像素矩形）----------
 
 #[cfg(windows)]
@@ -830,25 +843,55 @@ fn inbox_pick_rect(e: &Env) -> RECT {
 }
 
 /// 文件页可见行数：绘制、命中、悬停三处必须取同一个数，否则第 9 行能点到却看不见。
+///
+/// 行的顺序是**待发清单在前、传输记录在后**：用户刚挑好的东西就该排在最上面，
+/// 不该被历史记录挤到下面去（那正是"我挑的文件去哪了"的来源）。
 #[cfg(windows)]
 fn file_rows_visible(st: &UiState) -> usize {
-    st.file_tasks.len().min(FILE_MAX_ROWS)
+    (st.send_picks.len() + st.file_tasks.len()).min(FILE_MAX_ROWS)
 }
 
-/// 第 i 行「取消」的可点矩形；`None` = 这一行不该出现「取消」（终态行 / 等回执行 / 无此行）
+/// 第 i 行是待发清单的一项，还是一条传输记录
 #[cfg(windows)]
-fn file_cancel_hit_rect(e: &Env, st: &UiState, i: usize) -> Option<RECT> {
-    st.file_tasks
-        .get(i)
-        .filter(|t| t.is_cancellable())
-        .map(|_| file_cancel_rect(e, i))
+enum FileRowKind {
+    /// 待发清单里的第几项
+    Pick(usize),
+    /// 传输记录里的第几条
+    Task(usize),
 }
 
-/// 命中的「取消」行下标：hit_test 与 hover_at 共用同一个入口，三处同源
+/// 行 → 种类。越界返回 None（画与命中都用它，越界的那一行谁也不认）
 #[cfg(windows)]
-fn file_cancel_row_at(e: &Env, st: &UiState, x: i32, y: i32) -> Option<usize> {
+fn file_row_kind(st: &UiState, i: usize) -> Option<FileRowKind> {
+    let np = st.send_picks.len();
+    if i < np {
+        Some(FileRowKind::Pick(i))
+    } else {
+        st.file_tasks.get(i - np).map(|_| FileRowKind::Task(i - np))
+    }
+}
+
+/// 行尾按钮的可点矩形；`None` = 这一行不该出现按钮（终态行 / 等回执行 / 无此行）。
+///
+/// 待发行上的是「移除」（还没发，撤掉就行），传输行上的是「取消」（在途，得掐断）。
+/// 两者几何相同、文字不同，判定也各自不同，但都从这里出，避免"看得见点不到"。
+#[cfg(windows)]
+fn file_action_hit_rect(e: &Env, st: &UiState, i: usize) -> Option<RECT> {
+    match file_row_kind(st, i)? {
+        FileRowKind::Pick(_) => Some(file_cancel_rect(e, i)),
+        FileRowKind::Task(t) => st
+            .file_tasks
+            .get(t)
+            .filter(|x| x.is_cancellable())
+            .map(|_| file_cancel_rect(e, i)),
+    }
+}
+
+/// 命中的行尾按钮下标：hit_test 与 hover_at 共用同一个入口，三处同源
+#[cfg(windows)]
+fn file_action_row_at(e: &Env, st: &UiState, x: i32, y: i32) -> Option<usize> {
     (0..file_rows_visible(st))
-        .find(|i| file_cancel_hit_rect(e, st, *i).is_some_and(|r| point_in(&r, x, y)))
+        .find(|i| file_action_hit_rect(e, st, *i).is_some_and(|r| point_in(&r, x, y)))
 }
 
 #[cfg(windows)]
@@ -1273,9 +1316,16 @@ fn pending_modules(st: &UiState) -> Vec<(crate::features::Module, bool)> {
     crate::features::changes(st)
 }
 
-/// 命中判定：坐标（物理像素）→ 目标（无命中返回 None）
+/// **区域 → 目标**：命中与悬停共用的唯一映射。
+///
+/// 回答的是"这一点落在哪个可交互区域里"——每个区域都是控件**本体**的绘制矩形，
+/// 落在区域内的任意像素都算。命中与悬停都只从这里取答案（见 [`hit_test`] / [`hover_at`]），
+/// 于是"点得到却不亮""亮的是另一个东西"这类偏差在结构上就没了。
+///
+/// 判定顺序即优先级：重叠时**先判到的那个**赢（小按钮先于整行、滚动条先于行、
+/// 行尾按钮先于收件目录芯片）。绘制侧也按这个顺序画，命中与高亮因此指向同一个东西。
 #[cfg(windows)]
-pub(crate) fn hit_test(st: &UiState, e: &Env, x: i32, y: i32) -> Option<HitTarget> {
+fn region_at(st: &UiState, e: &Env, x: i32, y: i32) -> Option<HitTarget> {
     // 模态优先：弹窗打开时，除弹窗自己的控件外一律不给命中（含导航区）
     if st.restart_prompt {
         let (later, now) = modal_btn_rects(e);
@@ -1396,8 +1446,8 @@ pub(crate) fn hit_test(st: &UiState, e: &Env, x: i32, y: i32) -> Option<HitTarge
             if point_in(&file_send_rect(e), x, y) {
                 return Some(HitTarget::SendFile);
             }
-            // 传输行的「取消」：只在途行应答（与绘制同一个 file_cancel_hit_rect）
-            if let Some(i) = file_cancel_row_at(e, st, x, y) {
+            // 行尾按钮：待发行的「移除」与传输行的「取消」（与绘制同一个 file_action_hit_rect）
+            if let Some(i) = file_action_row_at(e, st, x, y) {
                 return Some(HitTarget::CancelFile(i));
             }
             if point_in(&inbox_pick_rect(e), x, y) {
@@ -1433,26 +1483,11 @@ pub(crate) fn hit_test(st: &UiState, e: &Env, x: i32, y: i32) -> Option<HitTarge
                     }));
                 }
             }
-            if point_in(&set_switch_rect(e, 0), x, y) {
-                return Some(HitTarget::ToggleToast);
-            }
-            if point_in(&set_switch_rect(e, 1), x, y) {
-                return Some(HitTarget::ToggleToastContent);
-            }
-            if point_in(&set_switch_rect(e, 2), x, y) {
-                return Some(HitTarget::ToggleClipSync);
-            }
-            // 开机后自动连接
-            if point_in(&set_switch_rect(e, 3), x, y) {
-                return Some(HitTarget::ToggleAutoConnect);
-            }
-            // 开机自启动（注册表里那条启动项的真值）
-            if point_in(&set_switch_rect(e, SET_AUTOSTART_ROW), x, y) {
-                return Some(HitTarget::ToggleAutostart);
-            }
-            // Debug 模式开关 + 导出日志
-            if point_in(&set_switch_rect(e, SET_DEBUG_ROW), x, y) {
-                return Some(HitTarget::ToggleDebug);
+            // 开关行：行与目标的对应走 SET_SWITCH_TARGETS 一张表（见该表的注释）
+            for (i, target) in SET_SWITCH_TARGETS.iter().enumerate() {
+                if point_in(&set_switch_rect(e, i), x, y) {
+                    return Some(*target);
+                }
             }
             if point_in(&set_behavior_rect(e), x, y) {
                 return Some(HitTarget::CycleCloseBehavior);
@@ -1488,6 +1523,35 @@ pub(crate) fn hit_test(st: &UiState, e: &Env, x: i32, y: i32) -> Option<HitTarge
         }
         _ => None,
     }
+}
+
+/// 命中判定：坐标（物理像素）→ 目标（无命中返回 None）
+///
+/// 命中 = 区域映射 **+ 精确命中**：点必须落在控件本体上（而不是"落在它所在的行/容器里"）。
+/// 这一层目前不额外筛掉什么——本 UI 的每个区域本身就是控件本体；将来出现"行里套控件"
+/// 的新控件时，只需在这里加一次精确判断，悬停侧（宽松）不受影响。
+#[cfg(windows)]
+pub(crate) fn hit_test(st: &UiState, e: &Env, x: i32, y: i32) -> Option<HitTarget> {
+    region_at(st, e, x, y)
+}
+
+/// 悬停判定：坐标（物理像素）→ 悬停目标（无命中返回 None）
+///
+/// 与命中**共用同一份区域映射**（[`region_at`]），差别只有一处：滚动条。
+/// 命中要的是"点在哪"（点轨道要滚到那一处），悬停要的是"落在滚动条上"——
+/// 载荷取当前滚动位置，保持稳定：鼠标在轨道上移动时悬停态不会来回抖。
+///
+/// 悬停目标与命中目标是**同一个枚举**：以前悬停报的是裸段号 `(u8, usize)`，
+/// 两套判定各写各的，于是剪贴板开关"点得到却不亮"、通知小按钮"亮的是整行"、
+/// 文件页两矩形重叠时"高亮与点击不是同一个东西"、通知页滚动条"完全不亮"。
+#[cfg(windows)]
+pub(crate) fn hover_at(st: &UiState, e: &Env, x: i32, y: i32) -> Option<HitTarget> {
+    let t = region_at(st, e, x, y)?;
+    Some(match t {
+        HitTarget::AlbumScroll(_) => HitTarget::AlbumScroll(album_base_row(e, st)),
+        HitTarget::NotifyScroll(_) => HitTarget::NotifyScroll(notify_base(e, st)),
+        other => other,
+    })
 }
 
 // ---------- 字体（角色化 + 跟随系统字体 + 缓存） ----------
@@ -2022,213 +2086,6 @@ pub(crate) fn album_viewport_cells(e: &Env) -> usize {
     (cols * rows) as usize
 }
 
-/// 悬停目标（导航下标 / 列表行 `(段, 行)`）；供 `WM_MOUSEMOVE` 驱动高亮与手型光标。
-/// 段号约定：0=设备列表 1=通知列表 2=剪贴板按钮 4=主题分段 5=设置开关 6=SAS 按钮（3 号段已废弃，不再分配）
-/// 7=文件页发送路径输入框 8=文件页发送按钮 9=设置页手动 IP 输入框 10=手动 IP 连接按钮 11=已绑定设备行（解绑）
-/// 12=身份变化确认按钮 13=Debug 导出按钮 14=功能页模块开关 15=功能页「重新启动」16/17=重启弹窗主/次按钮
-/// 18=媒体页控制按钮 19=「选择…」按钮 20=传输行「取消」21=「改到别处…」（收件目录）22=相册工具行按钮 23=相册格子。
-#[cfg(windows)]
-pub(crate) fn hover_at(
-    st: &UiState,
-    e: &Env,
-    x: i32,
-    y: i32,
-) -> (Option<usize>, Option<(u8, usize)>) {
-    // 弹窗打开时导航项也不给高亮：那一下点了也不会生效，亮起来是骗人的
-    if st.restart_prompt {
-        let (later, now) = modal_btn_rects(e);
-        return (
-            None,
-            if point_in(&now, x, y) {
-                Some((16u8, 0))
-            } else if point_in(&later, x, y) {
-                Some((17u8, 0))
-            } else {
-                None
-            },
-        );
-    }
-    if st.close_prompt {
-        let r = close_prompt_rects(e);
-        return (
-            None,
-            if point_in(&r.minimize, x, y) {
-                Some((26u8, 0))
-            } else if point_in(&r.exit, x, y) {
-                Some((27u8, 0))
-            } else if point_in(&r.cancel, x, y) {
-                Some((28u8, 0))
-            } else if point_in(&r.remember, x, y) {
-                Some((29u8, 0))
-            } else {
-                None
-            },
-        );
-    }
-    if x < e.px(NAV_W) {
-        // 返回的是**行号**（可见列表里的位置），绘制那边按同一口径高亮
-        let vis = nav_visible();
-        return (
-            (0..vis.len()).find(|r| point_in(&nav_item_rect(e, *r), x, y)),
-            None,
-        );
-    }
-    match st.active_tab {
-        TAB_CONNECT => {
-            let row = st
-                .devices
-                .iter()
-                .enumerate()
-                .find(|(i, _)| point_in(&device_row_rect(e, *i), x, y))
-                .map(|(i, _)| (0u8, i));
-            if row.is_some() {
-                return (None, row);
-            }
-            if st.identity_change.is_some() {
-                let (a, r) = identity_buttons(e, st.devices.len());
-                if point_in(&a, x, y) {
-                    return (None, Some((12, 0)));
-                }
-                if point_in(&r, x, y) {
-                    return (None, Some((12, 1)));
-                }
-            }
-            if sas_pending(st) {
-                let (c, r) = sas_buttons(e, st.devices.len());
-                if point_in(&c, x, y) {
-                    return (None, Some((6, 0)));
-                }
-                if point_in(&r, x, y) {
-                    return (None, Some((6, 1)));
-                }
-            }
-            (None, None)
-        }
-        TAB_NOTIFY => {
-            let bar = if st.reply_target.is_some() {
-                let (input, send) = notify_reply_rects(e);
-                if point_in(&send, x, y) {
-                    Some((3u8, 0))
-                } else if point_in(&input, x, y) {
-                    Some((2u8, 0))
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            (
-                None,
-                bar.or_else(|| {
-                    let base = notify_base(e, st);
-                    (0..notify_visible_rows(e))
-                        .filter(|s| base + s < st.notifications.len())
-                        .find(|s| point_in(&notification_row_rect(e, *s), x, y))
-                        .map(|s| (1u8, base + s))
-                }),
-            )
-        }
-        TAB_CLIP => (
-            None,
-            if point_in(&clip_send_rect(e), x, y) {
-                Some((2u8, 0))
-            } else {
-                None
-            },
-        ),
-        TAB_FILES => (
-            None,
-            if point_in(&file_path_rect(e), x, y) {
-                Some((7u8, 0))
-            } else if point_in(&file_browse_rect(e), x, y) {
-                Some((19u8, 0))
-            } else if point_in(&file_send_rect(e), x, y) {
-                Some((8u8, 0))
-            } else if point_in(&inbox_pick_rect(e), x, y) {
-                Some((21u8, 0))
-            } else {
-                // 20 号段 = 文件页传输行的「取消」按钮（与 hit_test 同一判据、同一几何）
-                file_cancel_row_at(e, st, x, y).map(|i| (20u8, i))
-            },
-        ),
-        TAB_MEDIA => (
-            None,
-            // 与 hit_test 同一前提：按钮没画就不给手型光标
-            if st.media.is_some() {
-                (0..MEDIA_BTN_COUNT)
-                    .find(|i| point_in(&media_btn_rect(e, *i), x, y))
-                    .map(|i| (18u8, i))
-            } else {
-                None
-            },
-        ),
-        TAB_FEATURES => (
-            None,
-            if crate::features::restart_pending(st) && point_in(&feat_restart_rect(e), x, y) {
-                Some((15u8, 0))
-            } else {
-                let mut hit = None;
-                for (i, _m) in crate::features::ALL.iter().enumerate() {
-                    if point_in(&feat_switch_rect(e, i), x, y) {
-                        hit = Some((14u8, i));
-                    }
-                }
-                hit
-            },
-        ),
-        TAB_SETTINGS => {
-            let mut hit = None;
-            for (i, r) in theme_seg_rects(e).iter().enumerate() {
-                if point_in(r, x, y) {
-                    hit = Some((4u8, i));
-                }
-            }
-            for i in 0..SET_TOGGLES {
-                if point_in(&set_switch_rect(e, i), x, y) {
-                    hit = Some((5u8, i));
-                }
-            }
-            if point_in(&set_behavior_rect(e), x, y) {
-                hit = Some((25u8, 0));
-            }
-            if point_in(&debug_export_rect(e), x, y) {
-                hit = Some((13u8, 0));
-            }
-            if point_in(&manual_ip_rect(e), x, y) {
-                hit = Some((9u8, 0));
-            }
-            if point_in(&manual_ip_btn_rect(e), x, y) {
-                hit = Some((10u8, 0));
-            }
-            let rows = st.bound_devices.len().min(SET_BOUND_MAX);
-            for i in 0..rows {
-                if point_in(&bound_row_rect(e, i), x, y) {
-                    hit = Some((11u8, i));
-                }
-            }
-            (None, hit)
-        }
-        TAB_ABOUT => (None, None),
-        TAB_ALBUM => {
-            // 段号 22 = 工具行按钮，23 = 格子（与 hit_test 同一份几何）
-            let mut hit = None;
-            for i in 0..ALBUM_BTN_W.len() {
-                if point_in(&album_btn_rect(e, i), x, y) {
-                    hit = Some((22u8, i));
-                }
-            }
-            if hit.is_none() {
-                hit = album_cell_at(e, st, x, y).map(|i| (23u8, i));
-            }
-            // 滑块单独占一个槽位：悬停要亮，否则用户看不出这条窄列是能拖的
-            if hit.is_none() && album_bar_thumb(e, st).is_some_and(|t| point_in(&t, x, y)) {
-                hit = Some((24u8, 0));
-            }
-            (None, hit)
-        }
-        _ => (None, None),
-    }
-}
 // ---------- 连接状态文案 ----------
 
 #[cfg(windows)]
@@ -2348,7 +2205,7 @@ fn paint_connect(hdc: HDC, e: &Env, st: &UiState, w: i32, h: i32) {
     } else {
         for (i, (addr, name)) in st.devices.iter().enumerate() {
             let row = device_row_rect(e, i);
-            let hovered = st.list_hover == Some((0, i));
+            let hovered = st.list_hover == Some(HitTarget::ConnectDevice(*addr));
             if st.selected == Some(*addr) {
                 fill_round(hdc, &row, p.sel_bg, e.px(8));
             } else if hovered {
@@ -2451,7 +2308,7 @@ fn paint_connect(hdc: HDC, e: &Env, st: &UiState, w: i32, h: i32) {
             &accept,
             "信任并重新配对",
             true,
-            st.list_hover == Some((12, 0)),
+            st.list_hover == Some(HitTarget::AcceptNewIdentity),
         );
         button(
             hdc,
@@ -2459,7 +2316,7 @@ fn paint_connect(hdc: HDC, e: &Env, st: &UiState, w: i32, h: i32) {
             &reject,
             "取消",
             false,
-            st.list_hover == Some((12, 1)),
+            st.list_hover == Some(HitTarget::RejectNewIdentity),
         );
     } else if sas_pending(st) {
         if let Some(sas) = st.sas {
@@ -2506,7 +2363,7 @@ fn paint_connect(hdc: HDC, e: &Env, st: &UiState, w: i32, h: i32) {
                 &confirm,
                 "确认一致",
                 true,
-                st.list_hover == Some((6, 0)),
+                st.list_hover == Some(HitTarget::SasConfirm),
             );
             button(
                 hdc,
@@ -2514,7 +2371,7 @@ fn paint_connect(hdc: HDC, e: &Env, st: &UiState, w: i32, h: i32) {
                 &reject,
                 "不一致",
                 false,
-                st.list_hover == Some((6, 1)),
+                st.list_hover == Some(HitTarget::SasReject),
             );
         }
     } else if st.link_paired() {
@@ -2695,9 +2552,16 @@ fn paint_notifications(hdc: HDC, e: &Env, st: &UiState, w: i32) {
             &st.reply_input,
             "输入回复内容",
             st.input_focus == crate::state::FOCUS_REPLY,
-            st.list_hover == Some((2, 0)),
+            st.list_hover == Some(HitTarget::FocusReplyInput),
         );
-        button(hdc, e, &send, "发送", true, st.list_hover == Some((3, 0)));
+        button(
+            hdc,
+            e,
+            &send,
+            "发送",
+            true,
+            st.list_hover == Some(HitTarget::SendReply),
+        );
     }
 
     if st.notifications.is_empty() {
@@ -2730,7 +2594,11 @@ fn paint_notifications(hdc: HDC, e: &Env, st: &UiState, w: i32) {
         let i = base + slot;
         let item = &st.notifications[i];
         let row = notification_row_rect(e, slot);
-        let hovered = st.list_hover == Some((1, i));
+        let hovered = st.list_hover == Some(HitTarget::CopyNotification(i));
+        // 行尾三颗小按钮各算各的悬停：以前悬停只认整行，指针压在小按钮上时亮的是整行 ——
+        // 看上去像"这一行能点"，实际点到的却是另一颗按钮
+        let code_hover = st.list_hover == Some(HitTarget::CopyNotificationCode(i));
+        let reply_hover = st.list_hover == Some(HitTarget::ReplyNotification(i));
         // 正在回复的那一行用选中底色标出来：按钮是裸文字，靠描边框子标选中态会在整页里
         // 多出唯一一个"框"，而行底色本来就是这套界面里"就是它"的说法（连接页同做法）。
         // 判据只走 `is_reply_target` 这一份：列表按 key 就地合并、行号一直在变，各处各算一遍迟早算出两个答案
@@ -2788,7 +2656,11 @@ fn paint_notifications(hdc: HDC, e: &Env, st: &UiState, w: i32) {
                 Role::Small,
                 chip,
                 "复制验证码",
-                if hovered { p.accent } else { p.accent_dim },
+                if hovered || code_hover {
+                    p.accent
+                } else {
+                    p.accent_dim
+                },
             );
         }
         text_out_center(
@@ -2806,7 +2678,7 @@ fn paint_notifications(hdc: HDC, e: &Env, st: &UiState, w: i32) {
                 Role::Small,
                 &chip,
                 "回复",
-                if selected || hovered {
+                if selected || hovered || reply_hover {
                     p.accent
                 } else {
                     p.accent_dim
@@ -2844,7 +2716,14 @@ fn paint_notifications(hdc: HDC, e: &Env, st: &UiState, w: i32) {
     }
 
     if let Some(thumb) = notify_bar_thumb(e, st) {
-        fill_round(hdc, &thumb, p.accent_dim, e.px(4));
+        // 悬停要亮：这条窄轨道是能拖的，不亮用户看不出它存在
+        let hot = matches!(st.list_hover, Some(HitTarget::NotifyScroll(_)));
+        fill_round(
+            hdc,
+            &thumb,
+            if hot { p.accent } else { p.accent_dim },
+            e.px(4),
+        );
     }
 }
 
@@ -2866,7 +2745,16 @@ fn paint_clipboard(hdc: HDC, e: &Env, st: &UiState, w: i32) {
 
     let tr = clip_toggle_rect(e);
     let on = st.clip_sync;
-    fill_round(hdc, &tr, if on { p.accent } else { p.btn_bg }, e.px(8));
+    // 悬停要亮：这颗开关以前点得到却不亮（悬停判定里压根没有它）
+    let hovered = st.list_hover == Some(HitTarget::ToggleClipSync);
+    let bg = if on {
+        p.accent
+    } else if hovered {
+        p.row_hover_bg
+    } else {
+        p.btn_bg
+    };
+    fill_round(hdc, &tr, bg, e.px(8));
     let label = if on {
         "剪贴板同步：开"
     } else {
@@ -2886,7 +2774,7 @@ fn paint_clipboard(hdc: HDC, e: &Env, st: &UiState, w: i32) {
         &clip_send_rect(e),
         "发送本机剪贴板",
         false,
-        st.list_hover == Some((2, 0)),
+        st.list_hover == Some(HitTarget::SendLocalClip),
     );
     // 这颗按钮平时用不上（电脑复制会自动同步），所以就在它下面说清它是"没同步上时手动重发"
     text_out(
@@ -3014,7 +2902,7 @@ fn paint_files(hdc: HDC, e: &Env, st: &UiState, w: i32) {
         Role::Small,
         e.px(CONTENT_L),
         e.px(FILE_SEND_LABEL_Y),
-        "发送到手机（点「选择…」挑文件，也可以把文件直接拖进这个窗口）",
+        "发送到手机（点「选择…」可一次挑多个文件，也可以把文件直接拖进这个窗口）",
         p.foot_text,
     );
     input_box(
@@ -3024,7 +2912,7 @@ fn paint_files(hdc: HDC, e: &Env, st: &UiState, w: i32) {
         &st.send_path_input,
         "先点右边的「选择…」",
         st.input_focus == crate::state::FOCUS_SEND_PATH,
-        st.list_hover == Some((7, 0)),
+        st.list_hover == Some(HitTarget::FocusSendPath),
     );
     button(
         hdc,
@@ -3032,7 +2920,7 @@ fn paint_files(hdc: HDC, e: &Env, st: &UiState, w: i32) {
         &file_browse_rect(e),
         "选择…",
         false,
-        st.list_hover == Some((19, 0)),
+        st.list_hover == Some(HitTarget::BrowseFile),
     );
     icon_button(
         hdc,
@@ -3041,7 +2929,7 @@ fn paint_files(hdc: HDC, e: &Env, st: &UiState, w: i32) {
         Icon::Send,
         "发送到手机",
         true,
-        st.list_hover == Some((8, 0)),
+        st.list_hover == Some(HitTarget::SendFile),
     );
 
     text_out(
@@ -3070,7 +2958,7 @@ fn paint_files(hdc: HDC, e: &Env, st: &UiState, w: i32) {
         &inbox,
         p.body_text,
     );
-    let hov = st.list_hover == Some((21, 0));
+    let hov = st.list_hover == Some(HitTarget::ChooseInbox);
     fill_round(
         hdc,
         &chip,
@@ -3093,12 +2981,17 @@ fn paint_files(hdc: HDC, e: &Env, st: &UiState, w: i32) {
         e.px(CONTENT_L),
         e.px(FILE_LIST_LABEL_Y),
         &format!(
-            "传输列表（最近 {} 条）",
+            "{}传输列表（最近 {} 条）",
+            if st.send_picks.is_empty() {
+                ""
+            } else {
+                "待发送 · "
+            },
             st.file_tasks.len().min(FILE_MAX_ROWS)
         ),
         p.foot_text,
     );
-    if st.file_tasks.is_empty() {
+    if st.file_tasks.is_empty() && st.send_picks.is_empty() {
         text_out(
             hdc,
             e,
@@ -3119,72 +3012,127 @@ fn paint_files(hdc: HDC, e: &Env, st: &UiState, w: i32) {
         );
         return;
     }
-    for (i, task) in st.file_tasks.iter().take(FILE_MAX_ROWS).enumerate() {
+    for i in 0..file_rows_visible(st) {
         let row = file_row_rect(e, i);
-        let send = task.direction == crate::state::TASK_DIR_SEND;
-        let done = task.state.starts_with("已完成");
-        // 「取消」只画在真能取消的行上；命中判定用的是同一个 rect（同一个判据）
-        let cancel = file_cancel_hit_rect(e, st, i);
-        // 状态文案的右界：有「取消」时让到它左边，两处共用一份几何就不会互相压字
-        let state_right = cancel.map(|r| r.left - e.px(6)).unwrap_or(right - e.px(12));
-        // 方向箭头（矢量图标：不依赖字体里的箭头字形，随主题换色、随 DPI 无损缩放）
+        // 行尾按钮：待发行是「移除」，传输行是「取消」；判定用的是同一个 rect（同一个判据）
+        let action = file_action_hit_rect(e, st, i);
+        // 状态文案的右界：有按钮时让到它左边，两处共用一份几何就不会互相压字
+        let state_right = action.map(|r| r.left - e.px(6)).unwrap_or(right - e.px(12));
         let x0 = row.left + e.px(12);
-        let (arrow, arrow_color) = if send {
-            (Icon::Upload, p.accent)
-        } else {
-            (Icon::Download, p.ok_text)
-        };
         let isz = e.px(NAV_ICON);
-        icons::draw(hdc, arrow, x0, row.top + e.px(3), isz, arrow_color);
-        let name_x = x0 + isz + e.px(8);
-        let name_max = state_right - e.px(150) - name_x;
-        let name = truncate_px(hdc, e, Role::BodyStrong, &task.name, name_max);
-        text_out(
-            hdc,
-            e,
-            Role::BodyStrong,
-            name_x,
-            row.top + e.px(5),
-            &name,
-            p.body_text,
-        );
-        // 右侧：状态 + 百分比 +（已知大小时）实时速度——只有百分比看不出"是不是卡住了、还要等多久"。
-        let mut state_txt = format!("{} {}%", task.state, task.percent);
-        if task.speed_kbps > 0 {
-            state_txt += &format!(" · {:.1} MB/s", task.speed_kbps as f64 / 1024.0);
-        }
-        text_out_right(
-            hdc,
-            e,
-            Role::Small,
-            state_right,
-            row.top + e.px(7),
-            &state_txt,
-            task_state_color(e, &task.state),
-        );
-        let bar = RECT {
-            left: x0,
-            top: row.bottom - e.px(11),
-            right: state_right,
-            bottom: row.bottom - e.px(7),
-        };
-        progress_bar(hdc, e, &bar, task.percent, done);
-        if let Some(rc) = cancel {
-            let hovered = st.list_hover == Some((20, i));
-            fill_round(
-                hdc,
-                &rc,
-                if hovered { p.accent } else { p.row_hover_bg },
-                e.px(8),
-            );
-            text_out_center(
-                hdc,
-                e,
-                Role::Small,
-                &rc,
-                "取消",
-                if hovered { 0xFFFFFF } else { p.accent },
-            );
+        match file_row_kind(st, i) {
+            Some(FileRowKind::Pick(pi)) => {
+                let pick = &st.send_picks[pi];
+                // 待发：方向同样是"发出去"，但用弱色 —— 它还没开始，别让人以为已经在传
+                icons::draw(hdc, Icon::Upload, x0, row.top + e.px(3), isz, p.sub_text);
+                let name_x = x0 + isz + e.px(8);
+                let name_max = state_right - e.px(150) - name_x;
+                let name = truncate_px(hdc, e, Role::BodyStrong, &pick.name, name_max);
+                text_out(
+                    hdc,
+                    e,
+                    Role::BodyStrong,
+                    name_x,
+                    row.top + e.px(5),
+                    &name,
+                    p.body_text,
+                );
+                // 右侧：状态 + 大小。**不画进度条**：还没开始发的文件挂一条 0% 的进度条，
+                // 用户只会以为"卡住了"，而实际状态是"还没发"
+                let mut state_txt = crate::state::SEND_PICK_STATE.to_string();
+                if pick.size > 0 {
+                    state_txt += &format!(" · {}", fmt_size(pick.size as i64));
+                }
+                text_out_right(
+                    hdc,
+                    e,
+                    Role::Small,
+                    state_right,
+                    row.top + e.px(7),
+                    &state_txt,
+                    p.sub_text,
+                );
+                if let Some(rc) = action {
+                    let hovered = st.list_hover == Some(HitTarget::CancelFile(i));
+                    fill_round(
+                        hdc,
+                        &rc,
+                        if hovered { p.accent } else { p.row_hover_bg },
+                        e.px(8),
+                    );
+                    text_out_center(
+                        hdc,
+                        e,
+                        Role::Small,
+                        &rc,
+                        "移除",
+                        if hovered { 0xFFFFFF } else { p.accent },
+                    );
+                }
+            }
+            Some(FileRowKind::Task(ti)) => {
+                let task = &st.file_tasks[ti];
+                let send = task.direction == crate::state::TASK_DIR_SEND;
+                let done = task.state.starts_with("已完成");
+                // 方向箭头（矢量图标：不依赖字体里的箭头字形，随主题换色、随 DPI 无损缩放）
+                let (arrow, arrow_color) = if send {
+                    (Icon::Upload, p.accent)
+                } else {
+                    (Icon::Download, p.ok_text)
+                };
+                icons::draw(hdc, arrow, x0, row.top + e.px(3), isz, arrow_color);
+                let name_x = x0 + isz + e.px(8);
+                let name_max = state_right - e.px(150) - name_x;
+                let name = truncate_px(hdc, e, Role::BodyStrong, &task.name, name_max);
+                text_out(
+                    hdc,
+                    e,
+                    Role::BodyStrong,
+                    name_x,
+                    row.top + e.px(5),
+                    &name,
+                    p.body_text,
+                );
+                // 右侧：状态 + 百分比 +（已知大小时）实时速度——只有百分比看不出"是不是卡住了、还要等多久"。
+                let mut state_txt = format!("{} {}%", task.state, task.percent);
+                if task.speed_kbps > 0 {
+                    state_txt += &format!(" · {:.1} MB/s", task.speed_kbps as f64 / 1024.0);
+                }
+                text_out_right(
+                    hdc,
+                    e,
+                    Role::Small,
+                    state_right,
+                    row.top + e.px(7),
+                    &state_txt,
+                    task_state_color(e, &task.state),
+                );
+                let bar = RECT {
+                    left: x0,
+                    top: row.bottom - e.px(11),
+                    right: state_right,
+                    bottom: row.bottom - e.px(7),
+                };
+                progress_bar(hdc, e, &bar, task.percent, done);
+                if let Some(rc) = action {
+                    let hovered = st.list_hover == Some(HitTarget::CancelFile(i));
+                    fill_round(
+                        hdc,
+                        &rc,
+                        if hovered { p.accent } else { p.row_hover_bg },
+                        e.px(8),
+                    );
+                    text_out_center(
+                        hdc,
+                        e,
+                        Role::Small,
+                        &rc,
+                        "取消",
+                        if hovered { 0xFFFFFF } else { p.accent },
+                    );
+                }
+            }
+            None => {}
         }
     }
 }
@@ -3357,7 +3305,7 @@ fn paint_media(hdc: HDC, e: &Env, st: &UiState) {
             *icon,
             name,
             i == 1,
-            st.list_hover == Some((18, i)),
+            st.list_hover == Some(HitTarget::MediaControl(i)),
         );
     }
     // 音量以手机上报值为基准（电脑不自己记账，否则用户在手机上调一次就永远对不上）。
@@ -3458,7 +3406,13 @@ fn paint_features(hdc: HDC, e: &Env, st: &UiState) {
             p.sub_text,
         );
         let sr = feat_switch_rect(e, i);
-        draw_switch(hdc, e, &sr, on, st.list_hover == Some((14, i)));
+        draw_switch(
+            hdc,
+            e,
+            &sr,
+            on,
+            st.list_hover == Some(HitTarget::ToggleFeature(*m)),
+        );
     }
 
     // 摘要两行：加载了什么 + 现在占多少内存。收益必须被看见，而不是只写在"节省内存"这句文案里（用户无从核对）。
@@ -3543,7 +3497,7 @@ fn paint_features(hdc: HDC, e: &Env, st: &UiState) {
         &feat_restart_rect(e),
         "重新启动",
         true,
-        st.list_hover == Some((15, 0)),
+        st.list_hover == Some(HitTarget::RestartApp),
     );
 }
 
@@ -3608,7 +3562,7 @@ fn paint_restart_modal(hdc: HDC, e: &Env, st: &UiState) {
         &later,
         "稍后启动",
         false,
-        st.list_hover == Some((17, 0)),
+        st.list_hover == Some(HitTarget::ModalRestartLater),
     );
     button(
         hdc,
@@ -3616,7 +3570,7 @@ fn paint_restart_modal(hdc: HDC, e: &Env, st: &UiState) {
         &now,
         "重新启动",
         true,
-        st.list_hover == Some((16, 0)),
+        st.list_hover == Some(HitTarget::ModalRestartNow),
     );
 }
 
@@ -3715,7 +3669,7 @@ fn paint_close_modal(hdc: HDC, e: &Env, st: &UiState) {
         &r.cancel,
         "取消",
         false,
-        st.list_hover == Some((28, 0)),
+        st.list_hover == Some(HitTarget::ModalCloseCancel),
     );
     button(
         hdc,
@@ -3723,7 +3677,7 @@ fn paint_close_modal(hdc: HDC, e: &Env, st: &UiState) {
         &r.exit,
         "退出程序",
         false,
-        st.list_hover == Some((27, 0)),
+        st.list_hover == Some(HitTarget::ModalCloseExit),
     );
     // 默认动作（回车）排在最右的主行位上：它不销毁任何东西，按错了也不可损失
     button(
@@ -3732,14 +3686,14 @@ fn paint_close_modal(hdc: HDC, e: &Env, st: &UiState) {
         &r.minimize,
         "最小化到托盘",
         true,
-        st.list_hover == Some((26, 0)),
+        st.list_hover == Some(HitTarget::ModalCloseMinimize),
     );
     draw_check(
         hdc,
         e,
         &r.remember,
         st.close_remember,
-        st.list_hover == Some((29, 0)),
+        st.list_hover == Some(HitTarget::ModalCloseRemember),
         "记住我的选择，不再询问",
     );
 }
@@ -3809,7 +3763,7 @@ fn paint_settings(hdc: HDC, e: &Env, st: &UiState) {
     let values = [Theme::System, Theme::Light, Theme::Dark];
     for i in 0..3 {
         let active = st.theme == values[i];
-        let hovered = st.list_hover == Some((4, i));
+        let hovered = st.list_hover == Some(HitTarget::ThemeSet(values[i]));
         if active {
             fill_round(hdc, &segs[i], p.accent, e.px(8));
         } else if hovered {
@@ -3893,6 +3847,12 @@ fn paint_settings(hdc: HDC, e: &Env, st: &UiState) {
     // 行号与命中判定共用：数组顺序改了就在这里响，而不是"点开关拨的是隔壁那一行"
     debug_assert_eq!(rows.get(SET_AUTOSTART_ROW).map(|r| r.0), Some("开机自启动"));
     debug_assert_eq!(rows.get(SET_DEBUG_ROW).map(|r| r.0), Some("Debug 模式"));
+    // 开关行序与 SET_SWITCH_TARGETS 一张表必须对得上：错位了就是"点开关拨的是隔壁那一行"
+    debug_assert_eq!(
+        SET_SWITCH_TARGETS[SET_AUTOSTART_ROW],
+        HitTarget::ToggleAutostart
+    );
+    debug_assert_eq!(SET_SWITCH_TARGETS[SET_DEBUG_ROW], HitTarget::ToggleDebug);
     for (i, (label, desc, on)) in rows.iter().enumerate() {
         let y = e.px(SET_TOGGLE_Y0 + i as i32 * SET_ROW_H);
         text_out(
@@ -3916,7 +3876,13 @@ fn paint_settings(hdc: HDC, e: &Env, st: &UiState) {
             p.sub_text,
         );
         let sr = set_switch_rect(e, i);
-        draw_switch(hdc, e, &sr, *on, st.list_hover == Some((5, i)));
+        draw_switch(
+            hdc,
+            e,
+            &sr,
+            *on,
+            st.list_hover == Some(SET_SWITCH_TARGETS[i]),
+        );
     }
     // 关闭按钮行为：右侧那一栏换成一个取值按钮，点一下在三个值之间循环
     {
@@ -3950,7 +3916,7 @@ fn paint_settings(hdc: HDC, e: &Env, st: &UiState) {
             &set_behavior_rect(e),
             st.close_behavior.label(),
             false,
-            st.list_hover == Some((25, 0)),
+            st.list_hover == Some(HitTarget::CycleCloseBehavior),
         );
     }
     // Debug 日志导出（任意目录；日志含配对与设备信息，仅交给可信方）
@@ -3960,7 +3926,7 @@ fn paint_settings(hdc: HDC, e: &Env, st: &UiState) {
         &debug_export_rect(e),
         "导出日志",
         false,
-        st.list_hover == Some((13, 0)),
+        st.list_hover == Some(HitTarget::ExportDebug),
     );
 
     // 设备管理：手动 IP 兜底 + 已绑定设备（解绑）；台数已并入下方列表标题，不另占一行高度。
@@ -3980,7 +3946,7 @@ fn paint_settings(hdc: HDC, e: &Env, st: &UiState) {
         &st.manual_ip_input,
         "192.168.1.23",
         st.input_focus == crate::state::FOCUS_MANUAL_IP,
-        st.list_hover == Some((9, 0)),
+        st.list_hover == Some(HitTarget::FocusManualIp),
     );
     button(
         hdc,
@@ -3988,7 +3954,7 @@ fn paint_settings(hdc: HDC, e: &Env, st: &UiState) {
         &manual_ip_btn_rect(e),
         "连接",
         false,
-        st.list_hover == Some((10, 0)),
+        st.list_hover == Some(HitTarget::ManualIpConnect),
     );
     // 发现状态：手动 IP 的"成功标志"就是这里变成对端 IP
     let found = if st.peer_lan_ip.is_empty() {
@@ -4034,7 +4000,7 @@ fn paint_settings(hdc: HDC, e: &Env, st: &UiState) {
     }
     for (i, (fp, name)) in st.bound_devices.iter().take(SET_BOUND_MAX).enumerate() {
         let row = bound_row_rect(e, i);
-        let hovered = st.list_hover == Some((11, i));
+        let hovered = st.list_hover == Some(HitTarget::UnbindDevice(i));
         if hovered {
             fill_round(hdc, &row, p.row_hover_bg, e.px(8));
         }
@@ -4382,7 +4348,7 @@ fn paint_album(hdc: HDC, e: &Env, st: &UiState, w: i32) {
 
     for slot in 0..ALBUM_BTN_W.len() {
         let rc = album_btn_rect(e, slot);
-        let hover = st.list_hover == Some((22, slot));
+        let hover = st.list_hover == Some(HitTarget::AlbumTool(slot));
         button(hdc, e, &rc, &album_tool_label(st, slot), slot == 4, hover);
     }
 
@@ -4446,7 +4412,7 @@ fn paint_album(hdc: HDC, e: &Env, st: &UiState, w: i32) {
         let slot = slot - base;
         let cell = album_cell_rect(e, slot, cols);
         let selected = st.album.selected.contains(&item.id);
-        let hover = st.list_hover == Some((23, base + slot));
+        let hover = st.list_hover == Some(HitTarget::AlbumCell(base + slot));
         fill(hdc, &cell, p.card_bg);
         match st.album.slot(item.id) {
             Some(crate::state::ThumbSlot::Ready(jpeg)) => {
@@ -4549,7 +4515,11 @@ fn paint_album(hdc: HDC, e: &Env, st: &UiState, w: i32) {
     }
 
     // 详情行：悬停格子的原始信息；没悬停就给操作提示 + "本页还有几张画不下"
-    let detail = match st.list_hover.filter(|s| s.0 == 23).map(|s| s.1) {
+    let detail = match st.list_hover {
+        Some(HitTarget::AlbumCell(i)) => Some(i),
+        _ => None,
+    };
+    let detail = match detail {
         Some(i) if st.album.items.get(i).is_some() => {
             let it = &st.album.items[i];
             let dim = if it.width > 0 && it.height > 0 {
@@ -4601,7 +4571,7 @@ fn paint_album(hdc: HDC, e: &Env, st: &UiState, w: i32) {
     if let Some(thumb) = album_bar_thumb(e, st) {
         let track = album_bar_track(e);
         fill(hdc, &track, p.divider);
-        let hot = st.list_hover == Some((24, 0));
+        let hot = matches!(st.list_hover, Some(HitTarget::AlbumScroll(_)));
         fill_round(
             hdc,
             &thumb,
@@ -4654,7 +4624,7 @@ fn paint_gdi(hdc: HDC, hwnd: HWND, st: &UiState) {
         let (label, icon) = nav_entry(tab).unwrap_or(("", Icon::Link));
         let item_rc = nav_item_rect(e, row);
         let selected = tab == st.active_tab;
-        let hovered = st.nav_hover == Some(row) && !selected;
+        let hovered = st.list_hover == Some(HitTarget::Nav(tab)) && !selected;
         if selected {
             fill_round(
                 hdc,
@@ -5249,5 +5219,170 @@ mod layout_tests {
                 "卡片超出客户区"
             );
         }
+    }
+}
+
+/// 悬停与命中的一致性：两者必须指向**同一个控件**。
+///
+/// 命中与悬停共用同一份区域映射（`region_at`），差别只在滚动条的载荷。
+/// 这组用例是那次整改的护栏：判定一旦分叉（"点得到却不亮""亮的是另一个东西"），
+/// 逐点比对就会在这里红。
+#[cfg(all(test, windows))]
+mod hover_tests {
+    use super::*;
+
+    /// 滚动条的载荷两义：命中是"点在哪"，悬停是"当前滚到哪"——比变体即可
+    fn control_of(t: HitTarget) -> HitTarget {
+        match t {
+            HitTarget::AlbumScroll(_) => HitTarget::AlbumScroll(0),
+            HitTarget::NotifyScroll(_) => HitTarget::NotifyScroll(0),
+            other => other,
+        }
+    }
+
+    /// 一份"什么都有"的状态：每页都摆上内容，空页会漏掉重叠区域的判定
+    fn sample_state(tab: usize) -> UiState {
+        let mut st = UiState::default();
+        st.active_tab = tab;
+        st.devices = vec![(0x0011_2233_4455_6677, "手机".to_string())];
+        st.notifications = (0..40)
+            .map(|i| crate::state::NotificationItem {
+                package: "com.example".to_string(),
+                title: format!("标题 {i}"),
+                text: "验证码 123456".to_string(),
+                can_reply: true,
+                ..Default::default()
+            })
+            .collect();
+        st.bound_devices = vec![("AA:BB:CC".to_string(), "手机".to_string())];
+        st.media = Some(crate::state::MediaView {
+            package: "com.example.music".to_string(),
+            title: "歌名".to_string(),
+            artist: "歌手".to_string(),
+            album: "专辑".to_string(),
+            playing: true,
+            position_ms: 0,
+            duration_ms: 1000,
+            speed_x100: 100,
+            volume: 50,
+        });
+        st.album.items = (0..40)
+            .map(|i| crate::state::AlbumItemView {
+                id: i as u64 + 1,
+                name: format!("照片 {i}.jpg"),
+                size_bytes: 1024,
+                mtime_ms: 0,
+                width: 100,
+                height: 100,
+                kind: 0,
+                duration_ms: 0,
+            })
+            .collect();
+        st
+    }
+
+    /// 逐点比对：悬停与命中必须落在同一个控件上（滚动条只比变体）
+    #[test]
+    fn hover_and_hit_never_point_at_different_controls() {
+        let e = crate::theme::test_env(960, 660, 1.0);
+        for tab in [
+            TAB_CONNECT,
+            TAB_NOTIFY,
+            TAB_CLIP,
+            TAB_FILES,
+            TAB_MEDIA,
+            TAB_FEATURES,
+            TAB_SETTINGS,
+            TAB_ALBUM,
+        ] {
+            let st = sample_state(tab);
+            let mut y = 0;
+            while y < e.win_h {
+                let mut x = 0;
+                while x < e.win_w {
+                    let h = hover_at(&st, &e, x, y).map(control_of);
+                    let g = hit_test(&st, &e, x, y).map(control_of);
+                    assert_eq!(h, g, "页 {tab} 的 ({x},{y})：悬停与命中指向了不同的东西");
+                    x += 7;
+                }
+                y += 7;
+            }
+        }
+    }
+
+    /// 剪贴板开关：以前点得到却**永远不亮**（悬停判定里压根没有它）
+    #[test]
+    fn clip_toggle_is_hoverable() {
+        let e = crate::theme::test_env(960, 660, 1.0);
+        let st = sample_state(TAB_CLIP);
+        let r = clip_toggle_rect(&e);
+        let (x, y) = ((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+        assert_eq!(hit_test(&st, &e, x, y), Some(HitTarget::ToggleClipSync));
+        assert_eq!(hover_at(&st, &e, x, y), Some(HitTarget::ToggleClipSync));
+    }
+
+    /// 通知行尾三颗小按钮：悬停要亮**那一颗**，不是整行
+    #[test]
+    fn notification_chips_hover_as_themselves() {
+        let e = crate::theme::test_env(960, 660, 1.0);
+        let st = sample_state(TAB_NOTIFY);
+        let (code, reply, all) = notification_chips(&e, 0, true, true);
+        let code = code.expect("有验证码就该有「复制验证码」那颗");
+        let (x, y) = ((code.left + code.right) / 2, (code.top + code.bottom) / 2);
+        assert_eq!(
+            hit_test(&st, &e, x, y),
+            Some(HitTarget::CopyNotificationCode(0))
+        );
+        assert_eq!(
+            hover_at(&st, &e, x, y),
+            Some(HitTarget::CopyNotificationCode(0))
+        );
+        let reply = reply.expect("可回复就该有「回复」那颗");
+        let (x, y) = (
+            (reply.left + reply.right) / 2,
+            (reply.top + reply.bottom) / 2,
+        );
+        assert_eq!(
+            hover_at(&st, &e, x, y),
+            Some(HitTarget::ReplyNotification(0))
+        );
+        // 「复制全文」与整行是同一个目标（点它 = 复制整条）
+        let (x, y) = ((all.left + all.right) / 2, (all.top + all.bottom) / 2);
+        assert_eq!(
+            hover_at(&st, &e, x, y),
+            Some(HitTarget::CopyNotification(0))
+        );
+    }
+
+    /// 文件页：收件目录芯片与行尾按钮都判，悬停与命中必须一致（以前两边顺序相反）
+    #[test]
+    fn file_page_hover_matches_hit() {
+        let e = crate::theme::test_env(960, 660, 1.0);
+        let st = sample_state(TAB_FILES);
+        let r = inbox_pick_rect(&e);
+        let (x, y) = ((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+        assert_eq!(hit_test(&st, &e, x, y), Some(HitTarget::ChooseInbox));
+        assert_eq!(hover_at(&st, &e, x, y), Some(HitTarget::ChooseInbox));
+    }
+
+    /// 通知页滚动条：以前悬停完全不处理（轨道不亮，用户看不出它能拖）
+    #[test]
+    fn notify_scrollbar_is_hoverable() {
+        let e = crate::theme::test_env(960, 660, 1.0);
+        let st = sample_state(TAB_NOTIFY);
+        assert!(
+            notify_bar_thumb(&e, &st).is_some(),
+            "这么多通知必须画不下，否则这条用例没意义"
+        );
+        let t = notify_bar_track(&e);
+        let (x, y) = ((t.left + t.right) / 2, (t.top + t.bottom) / 2);
+        assert!(matches!(
+            hit_test(&st, &e, x, y),
+            Some(HitTarget::NotifyScroll(_))
+        ));
+        assert!(matches!(
+            hover_at(&st, &e, x, y),
+            Some(HitTarget::NotifyScroll(_))
+        ));
     }
 }

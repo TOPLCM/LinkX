@@ -481,6 +481,21 @@ pub(crate) struct FileTaskView {
     prev_at: Option<std::time::Instant>,
 }
 
+/// 待发清单里的一项：用户已经挑好、还没点「发送到手机」的文件。
+///
+/// **与 `file_tasks` 分开存**：传输记录是"已经发生过的事"（按名字原地更新、只留最近若干条），
+/// 待发清单是"用户挑中的东西"（要能逐项移除、要按选择顺序发）。两件事混在一张表里，
+/// 「移除一个还没发的文件」就得去猜哪一行是待发的。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SendPick {
+    /// 完整路径（发给引擎的就是它）
+    pub path: String,
+    /// 文件名（界面显示用）
+    pub name: String,
+    /// 字节数（0 = 读不到大小，界面就不显示体积）
+    pub size: u64,
+}
+
 /// 在途状态白名单：只有这些状态下「取消」真的还能掐断点什么。
 /// 等对端回执 / 已落终态的行也画按钮就是骗人 —— 分块早交出去了，点下去什么也停不下来
 const CANCELLABLE_TASK_STATES: [&str; 6] = [
@@ -491,6 +506,9 @@ const CANCELLABLE_TASK_STATES: [&str; 6] = [
     "接收中",
     "重传中",
 ];
+
+/// 待发清单的状态文案：单独一个常量，绘制与命中判定共用，避免两处各写各的
+pub(crate) const SEND_PICK_STATE: &str = "待发送";
 
 impl FileTaskView {
     /// 这一行是否可取消。**绘制「取消」与命中「取消」必须共用这一个判据**，分两处各判就容易出现"看得见点不到"
@@ -606,6 +624,8 @@ pub(crate) struct UiState {
     pub manual_ip_input: String,
     pub file_tasks: Vec<FileTaskView>,
     pub send_path_input: String,
+    /// 待发清单：用户挑好但还没发出的文件（可多选、可逐项移除）
+    pub send_picks: Vec<SendPick>,
     pub inbox_dir: String,
     pub bound_devices: Vec<(String, String)>,
 
@@ -666,7 +686,7 @@ pub(crate) struct UiState {
     pub confirm_sas_req: bool,
     pub reject_sas_req: bool,
     pub send_clip_req: Option<String>,
-    pub send_file_req: bool,
+    pub send_file_req: Option<Vec<String>>,
     pub manual_ip_req: bool,
     /// 取消一条在途任务 `(方向, 文件名)`：与 `update_file_task` 的键同口径，另存一套键两处必然漂
     pub cancel_file_req: Option<(u8, String)>,
@@ -679,8 +699,10 @@ pub(crate) struct UiState {
 
     // ---- UI 线程自持 ----
     pub active_tab: usize,
-    pub nav_hover: Option<usize>,
-    pub list_hover: Option<(u8, usize)>,
+    /// 当前悬停的可交互目标：**与命中目标同一个枚举**（`render::HitTarget`）。
+    /// 以前这里是裸段号 `(u8, usize)`，与命中判定各写各的，于是"点得到却不亮"这类偏差
+    /// 一批批冒出来；现在两者共用同一份区域映射，悬停与命中不可能再指向不同的东西。
+    pub list_hover: Option<crate::render::HitTarget>,
     pub anim_start: Option<Instant>,
     pub hwnd_raw: isize,
     /// 已应用的对端剪贴板内容（防回声：与 WM_CLIPBOARDUPDATE 读到的相同时忽略一次）
@@ -739,6 +761,7 @@ impl Default for UiState {
             manual_ip_input: String::new(),
             file_tasks: Vec::new(),
             send_path_input: String::new(),
+            send_picks: Vec::new(),
             inbox_dir: default_inbox_dir(),
             bound_devices: Vec::new(),
             notifications: Vec::new(),
@@ -777,7 +800,7 @@ impl Default for UiState {
             confirm_sas_req: false,
             reject_sas_req: false,
             send_clip_req: None,
-            send_file_req: false,
+            send_file_req: None,
             manual_ip_req: false,
             cancel_file_req: None,
             debug_drop_chunk_at: None,
@@ -786,7 +809,6 @@ impl Default for UiState {
             accept_identity_req: false,
             reject_identity_req: false,
             active_tab: 0,
-            nav_hover: None,
             list_hover: None,
             anim_start: None,
             hwnd_raw: 0,
@@ -912,6 +934,47 @@ impl UiState {
     pub(crate) fn push_file_task(&mut self, item: FileTaskView) {
         self.file_tasks.insert(0, item);
         self.file_tasks.truncate(MAX_FILE_TASKS);
+    }
+
+    /// 把用户挑中的一批文件加进待发清单，返回**新加进去的条数**。
+    ///
+    /// 同一个文件重复挑（对话框里 Ctrl 又点了一次刚才那个）不该在界面上出现两行：
+    /// 用户看到两行同名文件，只会觉得"这软件有毛病"。
+    pub(crate) fn add_send_picks(&mut self, picks: Vec<SendPick>) -> usize {
+        let before = self.send_picks.len();
+        for p in picks {
+            if self
+                .send_picks
+                .iter()
+                .any(|q| q.path.eq_ignore_ascii_case(&p.path))
+            {
+                continue;
+            }
+            self.send_picks.push(p);
+        }
+        let added = self.send_picks.len() - before;
+        if added > 0 {
+            self.ui_rev += 1;
+        }
+        added
+    }
+
+    /// 移除待发清单里的第 i 项（界面上「移除」按钮）。返回是否真的删掉了。
+    pub(crate) fn remove_send_pick(&mut self, i: usize) -> bool {
+        if i >= self.send_picks.len() {
+            return false;
+        }
+        self.send_picks.remove(i);
+        self.ui_rev += 1;
+        true
+    }
+
+    /// 取走整份待发清单（点「发送到手机」时交给 worker），界面上的清单同时清空。
+    pub(crate) fn take_send_picks(&mut self) -> Vec<String> {
+        let paths: Vec<String> = self.send_picks.iter().map(|p| p.path.clone()).collect();
+        self.send_picks.clear();
+        self.ui_rev += 1;
+        paths
     }
 
     pub(crate) fn update_file_task(&mut self, name: &str, direction: u8, percent: u8, state: &str) {
@@ -1676,6 +1739,35 @@ mod tests {
             st.push_notification(item("com.a", &format!("t{i}"), "x", 0));
         }
         assert_eq!(st.notifications.len(), MAX_NOTIFICATIONS);
+    }
+
+    /// 待发清单：同一路径不重复进、逐条可移除、取走时保持选择顺序
+    #[test]
+    fn send_picks_dedupe_remove_and_take_in_order() {
+        let mut st = UiState::default();
+        let mk = |p: &str| SendPick {
+            path: p.to_string(),
+            name: p.rsplit('\\').next().unwrap_or(p).to_string(),
+            size: 10,
+        };
+        let added = st.add_send_picks(vec![
+            mk("C:\\a.txt"),
+            mk("C:\\b.txt"),
+            mk("C:\\a.txt"), // 同一个文件又挑了一次
+        ]);
+        assert_eq!(added, 2, "重复的路径不该在清单里出现两次");
+        assert_eq!(st.send_picks.len(), 2);
+        assert_eq!(st.send_picks[0].name, "a.txt");
+        assert_eq!(st.send_picks[1].name, "b.txt");
+
+        assert!(st.remove_send_pick(0));
+        assert_eq!(st.send_picks.len(), 1);
+        assert_eq!(st.send_picks[0].name, "b.txt");
+        assert!(!st.remove_send_pick(5), "越界的下标要老实说没删成");
+
+        let paths = st.take_send_picks();
+        assert_eq!(paths, vec!["C:\\b.txt".to_string()], "取走时保持选择顺序");
+        assert!(st.send_picks.is_empty(), "取走之后清单要清空");
     }
 
     #[test]

@@ -182,7 +182,7 @@ dependencies = [
 
 [[package]]
 name = "debuglog"
-version = "0.5.1"
+version = "0.5.2"
 
 [[package]]
 name = "der"
@@ -392,7 +392,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "linkx-crypto"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "chacha20poly1305",
  "debuglog",
@@ -420,7 +420,7 @@ dependencies = [
 
 [[package]]
 name = "linkx-protocol"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "prost",
  "prost-build",
@@ -429,7 +429,7 @@ dependencies = [
 
 [[package]]
 name = "linkx-transfer"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "crc32fast",
  "debuglog",

@@ -1,3 +1,7 @@
+/**
+ * 开机自启：手机重启或覆盖安装后，把链路服务重新拉起来。
+ */
+
 package com.linkx.app
 
 import android.content.BroadcastReceiver

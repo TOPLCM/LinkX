@@ -29,10 +29,6 @@ impl TransferState {
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Done | Self::Failed | Self::Cancelled)
     }
-
-    pub fn is_resumable(self) -> bool {
-        self == Self::Paused
-    }
 }
 
 // ---------------------------------------------------------------- 发送任务
@@ -340,7 +336,7 @@ mod tests {
             Err(TransferError::Protocol(_))
         ));
         sender.pause();
-        assert!(sender.state.is_resumable());
+        assert_eq!(sender.state, TransferState::Paused, "暂停态即续传态");
     }
 
     #[test]

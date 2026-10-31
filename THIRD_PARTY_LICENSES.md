@@ -28,7 +28,7 @@ Tien Do Nam 及贡献者（Copyright 2022-2026）。许可全文（`LICENSE`）�
 上游文件自带 SPDX 与版权行，不得删除，无额外义务。
 
 **Android 运行时依赖**：由 `Platforms/Android/app/build.gradle.kts` 声明。
-APK 目前还没有随附许可清单，这一项义务尚未履行，落地方式见「二」。
+APK 已在 `assets/licenses/` 随附许可清单，并在「关于」页给出入口，落地方式见「二」。
 
 **图标包**：来源与授权见「三」。
 
@@ -39,11 +39,11 @@ Apache-2.0 §4(a) 与 GPL-3.0 §4 都要求"作品的任何分发形式"附带�
 
 - **MSI**：`Platforms/Windows/installers/LinkX-v4.wxs` 的 `MainExecutable` 组件把 `LICENSE`、
   `THIRD_PARTY_LICENSES.md`、`Licenses/localsend/LICENSE`（安装为 `LICENSE-localsend.txt`）、
-  `Licenses/localsend/NOTICE`（安装为 `NOTICE-localsend.txt`）四个文件放进安装目录。
-- **APK**：尚未携带许可清单。做法是在 `Scripts/build-android-apk.sh` 打包前把同一组文本放进
-  `assets/licenses/`，并在「关于」页给一个入口。
-- **早期 wixl 链路**（`Platforms/Windows/installers/LinkX.wxs`）不带任何许可文件，
-  不要用它做公开分发。
+  `Licenses/localsend/NOTICE`（安装为 `NOTICE-localsend.txt`）、
+  `Licenses/localsend/PORTING.md`（安装为 `PORTING-localsend.md`）五个文件放进安装目录。
+- **APK**：`Scripts/build-android-apk.sh` 在打包前把同一组文本放进 `assets/licenses/`，
+  「关于」页可逐份查看全文；出包脚本会校验包内确有这五份。
+- 出包链路只剩一条（WiX Toolset v5），先前的 wixl 链路已下线，不存在"用别条链路出包"的情况。
 
 ## 三、图标包来源与授权
 
@@ -81,3 +81,10 @@ Apache-2.0 §4(a) 与 GPL-3.0 §4 都要求"作品的任何分发形式"附带�
   `chacha20poly1305`、`snow`、`x25519-dalek`、`sha2`、`hkdf` 这五件。**交付洁净门禁**
   `Scripts/check-release-clean.sh` 另外在交付产物的字节里禁止 `LocalSend` 与 `localsend` 串，
   防的是将来不小心把它带回来。
+
+  这条禁令有一处**精确到次数的例外**：`.so` 与 `exe` 两层仍然一字不许出现；
+  但 APK 的**代码层**（dex 与资源表）必须且只能出现许可署名清单里的那几处字面量
+  （三个许可文件名 + 「关于」页的三行署名标签）—— Apache-2.0 §4(b)/(d) 要求随分发附带的上游
+  署名与改动声明里写出上游项目名，这几处是义务、不是残留。判据是**次数相等**：多一次说明别处
+  混进了上游实现，少一次说明这份安装包没带上应有的署名。许可正文本身（`assets/licenses/` 与
+  安装目录里的那几份文件）当然写着上游项目名，那部分不在扫描范围内。

@@ -172,16 +172,30 @@ fn main() {
         store.get_pair_fingerprint(&[0x0F; 8]).unwrap() == Some("aabbccddeeff0011".into())
     });
 
-    // 10. FFI 事件队列 + C ABI
-    run!("ffi tx queue + C ABI", {
-        let ctx = linkx_core::linkx_ffi_ctx_new();
-        let mut ok = !ctx.is_null();
-        ok &= linkx_core::linkx_ffi_emit_error(ctx, -213) == 0;
-        let mut ev = unsafe { std::mem::zeroed::<linkx_core::FfiEvent>() };
-        ok &= unsafe { linkx_core::linkx_ffi_poll_event(ctx, &mut ev) } == 1;
-        ok &= ev.code == -213;
-        unsafe { linkx_core::linkx_ffi_ctx_free(ctx) };
-        ok
+    // 10. 会话引擎出站帧（C ABI 事件队列已撤除，Core→平台侧改走 Rust 直连路径）
+    run!("session engine outbound frame", {
+        use linkx_session::engine::{EngineConfig, EngineRole, SessionEngine};
+        let cfg = EngineConfig::new(
+            EngineRole::Initiator,
+            "sanity",
+            linkx_protocol::OS_WINDOWS,
+            "0.1.0",
+            [0x5A; 32],
+        );
+        let mut eng = SessionEngine::new(cfg);
+        eng.start(Instant::now());
+        // 引擎把 HELLO 拆成 BLE 分片交给平台侧；平台侧重组回来必须还是一条合法 HELLO 帧
+        let mut r = BleReassembler::new();
+        let mut full = None;
+        for p in eng.take_outbound() {
+            if let Some(f) = r.feed(Instant::now(), &p).unwrap_or(None) {
+                full = Some(f);
+            }
+        }
+        full.is_some_and(|f| {
+            f.len() > 13
+                && FrameHeader::parse(&f[..13]).is_ok_and(|h| h.msg_type == msg_type::HELLO)
+        })
     });
 
     // 11. TCP 帧流（本地环回冒烟）
@@ -221,11 +235,9 @@ fn main() {
         ok
     });
 
-    // 14. 版本单一真源（FFI C 字符串 == Rust 常量 == 跨端 versionName）
+    // 14. 版本单一真源（Core 常量 == 本 crate 版本 == 跨端 versionName 的取值处）
     run!("version single source", {
-        let c = unsafe { std::ffi::CStr::from_ptr(linkx_core::linkx_version()) };
-        c.to_str().is_ok_and(|s| s == linkx_core::LINKX_FFI_VERSION)
-            && linkx_core::LINKX_FFI_VERSION == env!("CARGO_PKG_VERSION")
+        linkx_core::LINKX_FFI_VERSION == env!("CARGO_PKG_VERSION")
     });
 
     let elapsed = t0.elapsed();

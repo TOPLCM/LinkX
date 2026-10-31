@@ -1,7 +1,7 @@
 //! LinkX 本地存储
 //!
 //! - 单一源 schema：`Crates/storage/schema.sql`，build 时嵌入并执行
-//! - 模型：device_identity / pair_records(TOFU) / sessions / config / message_log
+//! - 模型：device_identity / pair_records(TOFU) / sessions / config
 
 use std::path::Path;
 
@@ -337,54 +337,6 @@ impl LinkxStore {
             |r| r.get::<_, i64>(0),
         )?)
     }
-
-    // ---- message_log（可选、仅 debug build 的环形日志） ----
-
-    /// 追加一条消息日志并裁剪到最近 `keep` 条（环形语义）
-    pub fn append_message_log(
-        &self,
-        msg_id: &[u8],
-        msg_type: i64,
-        payload_ref: Option<&str>,
-        ts: i64,
-        keep: usize,
-    ) -> Result<(), StoreError> {
-        let inserted = self.conn.execute(
-            "INSERT INTO message_log (msg_id, msg_type, payload_ref, ts) VALUES (?1, ?2, ?3, ?4)",
-            params![msg_id, msg_type, payload_ref, ts],
-        )?;
-        let trimmed = self.conn.execute(
-            "DELETE FROM message_log WHERE rowid NOT IN
-               (SELECT rowid FROM message_log ORDER BY ts DESC LIMIT ?1)",
-            params![keep as i64],
-        )?;
-        // 埋点：消息日志环形裁剪（只记条数与 msg_type，不记 payload）
-        debuglog::log!(
-            Level::Info,
-            "storage",
-            "dao.append_log",
-            &[
-                ("inserted", &inserted.to_string()),
-                ("trimmed", &trimmed.to_string()),
-                ("msg_type", &msg_type.to_string()),
-            ]
-        );
-        Ok(())
-    }
-
-    pub fn count_message_log(&self) -> Result<i64, StoreError> {
-        Ok(self
-            .conn
-            .query_row("SELECT COUNT(*) FROM message_log", [], |r| {
-                r.get::<_, i64>(0)
-            })?)
-    }
-
-    /// 清空消息日志（隐私：用户可随时清除）
-    pub fn clear_message_log(&self) -> Result<(), StoreError> {
-        self.conn.execute("DELETE FROM message_log", [])?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -545,18 +497,5 @@ mod tests {
         store.unbind_pair(&peer).unwrap();
         assert_eq!(store.count_sessions_of_peer(&peer).unwrap(), 0);
         assert!(store.session_last_active(&sid).unwrap().is_none());
-    }
-
-    #[test]
-    fn message_log_ring_trim() {
-        let store = LinkxStore::open_in_memory().unwrap();
-        for i in 0..10i64 {
-            store
-                .append_message_log(&[i as u8; 16], 0x10, None, 1000 + i, 5)
-                .unwrap();
-        }
-        assert_eq!(store.count_message_log().unwrap(), 5, "应只保留最近 5 条");
-        store.clear_message_log().unwrap();
-        assert_eq!(store.count_message_log().unwrap(), 0);
     }
 }

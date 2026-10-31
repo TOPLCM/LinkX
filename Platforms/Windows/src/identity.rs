@@ -4,6 +4,8 @@
 //! 信任库 `trusted_peers.tsv` 每行以制表符分列 `指纹 ⇥ 名称`（公钥指纹非机密）；旧版单指纹文件在首次生成 RSA 身份时归档为 `*.bak` —— 旧 X25519
 //! 指纹对新身份无意义，对端需重配一次。
 //! 本模块**不依赖 Windows UI 模块**以便在 host 上直接跑单测，因此未使用告警属预期、显式放行。
+//! 该豁免**只在非 Windows（host 单测/交叉编译检查）构建里生效**：Windows 构建里这些函数都有人用，
+//! 豁免一旦扩散到 Windows 上就会盖住真正的死代码。
 #![cfg_attr(not(windows), allow(dead_code))]
 
 use std::fs;

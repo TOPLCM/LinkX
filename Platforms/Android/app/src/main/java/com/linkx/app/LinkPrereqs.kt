@@ -1,3 +1,7 @@
+/**
+ * 连接前提体检：蓝牙有没有开、有没有连在局域网里 —— 缺什么就说什么。
+ */
+
 package com.linkx.app
 
 import android.bluetooth.BluetoothAdapter

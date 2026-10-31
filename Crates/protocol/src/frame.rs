@@ -28,14 +28,9 @@ pub enum FrameError {
 
 /// flags 位定义
 pub mod flags {
-    pub const KEYFRAME: u8 = 1 << 0; // 镜像 IDR 帧
-    pub const ACK: u8 = 1 << 1; // 应用层 ACK
-    pub const FIN: u8 = 1 << 2; // 分块末尾
-    pub const RETRY: u8 = 1 << 3; // 重传标记
+    // bit0/1/2/3/5/6/7 曾规划过（镜像帧 / 应用层 ACK / 分块末尾 / 重传 / 压缩 /
+    // channel binding 上下文 / JSON debug 模式），从未启用过：号位保留，不复用。
     pub const ENCRYPTED: u8 = 1 << 4; // 除心跳外全部置 1
-    pub const COMPRESSED: u8 = 1 << 5; // zstd（暂未启用）
-    pub const CHANNEL_BIND: u8 = 1 << 6; // channel binding 上下文
-    pub const DEBUG_JSON: u8 = 1 << 7; // JSON debug 模式
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

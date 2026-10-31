@@ -55,6 +55,9 @@ const SUBNET_REFRESH: Duration = Duration::from_secs(15);
 /// 按 8 给只有 ~10 MB/s（千兆局域网下明显慢于链路能力）；按 32 给 ≈40 MB/s，仍然有界：
 /// 一轮写不完就下一轮，不会把整条链路堵死（socket 写是同步的，背压由内核缓冲自然形成）。
 const SEND_CHUNKS_PER_TICK: usize = 32;
+/// 待发队列的长度上限。一次发一叠文件是常态（选十几张图），
+/// 但队列是**无界的**就能被"一次挑 5000 个文件"把内存吃光；超出的部分当场拒掉并说清楚。
+const SEND_QUEUE_MAX: usize = 64;
 /// 每轮最多写出的 BLE 分片数（次数上限，与链路 MTU 无关：即便对端只支持 23，每 200 ms
 /// 也能移出 112B 净流，够身份/心跳/剪贴板用；文件类大载荷走 TCP）。次数挡不住阻塞，
 /// 还要配下面的时长上限——真机曾测到单轮 `flush_ble_out` 跑到 30.7 s，把收包与心跳全饿死。
@@ -166,7 +169,8 @@ struct UiRequests {
     confirm_sas: bool,
     reject_sas: bool,
     send_clip: Option<String>,
-    send_file: bool,
+    /// 待发送的文件路径列表（一次可以是一叠）
+    send_file: Option<Vec<String>>,
     manual_ip: bool,
     unbind: bool,
     accept_identity: bool,
@@ -191,8 +195,7 @@ fn take_ui_requests(st: &mut UiState) -> UiRequests {
     st.confirm_sas_req = false;
     let reject_sas = st.reject_sas_req;
     st.reject_sas_req = false;
-    let send_file = st.send_file_req;
-    st.send_file_req = false;
+    let send_file = st.send_file_req.take();
     let manual_ip = st.manual_ip_req;
     st.manual_ip_req = false;
     let unbind = st.unbind_requested;
@@ -333,7 +336,7 @@ fn worker_loop(hwnd_raw: isize, state: SharedState) {
         discovery: None,
         discovery_failed_at: None,
         subnet_refreshed_at: None,
-        pending_send: None,
+        pending_send: std::collections::VecDeque::new(),
         send: None,
         recv: Vec::new(),
         drop_chunk_at: None,
@@ -426,8 +429,9 @@ struct Worker {
     /// 上次重问系统"本机有哪些子网"的时刻（多网卡的定向广播目标，见 `pump_discovery`）
     subnet_refreshed_at: Option<Instant>,
 
-    /// 待发送文件路径（等配对 + TCP 就绪）
-    pending_send: Option<String>,
+    /// 待发送文件路径队列（等配对 + TCP 就绪）。**一次可以排一叠**：逐个发，
+    /// 发完一个接下一个；队列是有界的（`SEND_QUEUE_MAX`），免得用户一次挑几千个文件把内存撑爆。
+    pending_send: std::collections::VecDeque<String>,
     send: Option<SendSession>,
     recv: Vec<RecvSession>,
     /// 故障注入的落地副本（`/action/drop-chunk` 写 `state.debug_drop_chunk_at`，见 `pump_send`）
@@ -542,8 +546,8 @@ impl Worker {
                     "send-file" => {
                         let path = linkx_debugd::query_param(query, "path").ok_or("缺 ?path=")?;
                         st.send_path_input = path.clone();
-                        st.send_file_req = true;
-                        // 这里只"下发命令"，不宣称已排队：是否受理由 worker 判（模块关、路径空、已有任务在传都会拒），结论看 /state.errors。
+                        st.send_file_req = Some(vec![path.clone()]);
+                        // 这里只"下发命令"，不宣称已排队：是否受理由 worker 判（模块关、路径空、队列满都会拒），结论看 /state.errors。
                         Ok(format!(
                             "已下发发送请求: {path}（受理结果见 /state 的 errors）"
                         ))
@@ -868,7 +872,7 @@ impl Worker {
             "ble_connected": self.ble.is_connected(),
             "has_send": self.send.is_some(),
             "recv_sessions": self.recv.len(),
-            "pending_send": self.pending_send,
+            "pending_send": self.pending_send.iter().collect::<Vec<_>>(),
             "last_send_err": self.last_send_err.clone(),
             "ui_conn_state": format!("{:?}", st.conn_state),
             "ui_devices": st.devices.len(),
@@ -908,6 +912,19 @@ impl Worker {
                     "state": t.state,
                     "size": t.size,
                     "speed_kbps": t.speed_kbps,
+                }))
+                .collect::<Vec<_>>(),
+            // 待发清单也要导出：它排在传输记录之前画在屏幕上，
+            // 自动化只看 ui_file_tasks 会把"挑好了但还没发"这件事读成"什么都没挑"
+            "ui_send_picks": st
+                .send_picks
+                .iter()
+                .take(crate::render::FILE_MAX_ROWS)
+                .map(|p| serde_json::json!({
+                    "name": p.name,
+                    "path": p.path,
+                    "size": p.size,
+                    "state": crate::state::SEND_PICK_STATE,
                 }))
                 .collect::<Vec<_>>(),
             "ui_battery": st.battery.map(|b| format!("{}%{}", b.level, if b.charging { "+充电" } else { "" })),
@@ -1044,7 +1061,10 @@ impl Worker {
             st.update_file_task(&s.name, TASK_DIR_SEND, 0, "失败");
             st.push_error(format!("链路重建，{} 的发送已中断，请重新发送", s.name));
         }
-        if let Some(p) = self.pending_send.take() {
+        // 队列里的每一个都要出声：链路重建时它们一个都没发出去，
+        // 用户看到的应该是"这 N 个没发成"，而不是"界面上一条记录都没有"
+        let queued: Vec<String> = self.pending_send.drain(..).collect();
+        for p in queued {
             st.push_error(format!("{p} 还在排队就被取消：链路已重建"));
         }
         let dropped: Vec<(String, u64)> = self
@@ -1287,7 +1307,7 @@ impl Worker {
         if self.engine.is_none()
             && (req.media_cmd.is_some()
                 || req.send_clip.is_some()
-                || req.send_file
+                || req.send_file.is_some()
                 || req.cancel_file.is_some()
                 || req.notify_reply.is_some()
                 || req.album_list.is_some()
@@ -1393,28 +1413,32 @@ impl Worker {
         if req.manual_ip {
             self.add_manual_peer();
         }
-        if req.send_file {
+        if let Some(paths) = req.send_file {
             // 运行期功能开关：文件传输未加载时，在**唯一的排队入口**上拒掉——四个入口（文件页按钮、启动参数、
             // `linkx.exe <路径>` 转交、控制面 `/action/send-file`）都汇到这里，在这里拦一次就不会出现
             // "已排进队列、但 TCP 通道永不绑定 → 任务无限停在『等待 TCP 通道』"。
             if !crate::features::enabled(crate::features::Module::FileTransfer) {
                 self.push_error("文件传输已关闭：请到「功能」页重新开启并重新启动".to_string());
+            } else if paths.is_empty() {
+                self.push_error("请先选择要发送的文件".to_string());
             } else {
-                let path = self
-                    .state
-                    .lock()
-                    .unwrap()
-                    .send_path_input
-                    .trim()
-                    .to_string();
-                if path.is_empty() {
-                    self.push_error("请先填写要发送的文件路径".to_string());
-                } else if let Some(busy) = &self.pending_send {
-                    // 出站一次只有一条任务（引擎侧也是单 `SendTask`）：静默顶掉前一条，前一条的
-                    // 界面行会永远停在"等待 TCP 通道"，两端都以为还在传。
-                    self.push_error(format!("已经在等「{busy}」发出去了：一条传完才能排下一条"));
+                // 一次可以发一叠文件：整批进队列，逐个发。队列是**有界**的，
+                // 否则用户一次挑 500 个文件就能把内存里的路径撑爆。
+                let room = SEND_QUEUE_MAX.saturating_sub(self.pending_send.len());
+                if room == 0 {
+                    self.push_error(format!(
+                        "待发队列已满（上限 {SEND_QUEUE_MAX} 个文件），等这批发完再选"
+                    ));
                 } else {
-                    self.pending_send = Some(path);
+                    for (i, p) in paths.into_iter().enumerate() {
+                        if i >= room {
+                            self.push_error(format!(
+                                "一次最多排队 {SEND_QUEUE_MAX} 个文件，这批多出来的没有排上"
+                            ));
+                            break;
+                        }
+                        self.pending_send.push_back(p);
+                    }
                 }
             }
         }
@@ -3108,18 +3132,19 @@ impl Worker {
             return;
         }
         // 还在队列里等配对/等 TCP：一帧都没发过，撤掉排队就是取消。
-        if dir == TASK_DIR_SEND
-            && self
+        if dir == TASK_DIR_SEND {
+            if let Some(pos) = self
                 .pending_send
-                .as_deref()
-                .is_some_and(|p| file_base_name(p) == name)
-        {
-            self.pending_send = None;
-            self.state
-                .lock()
-                .unwrap()
-                .update_file_task(name, TASK_DIR_SEND, 0, "已取消");
-            return;
+                .iter()
+                .position(|p| file_base_name(p) == name)
+            {
+                self.pending_send.remove(pos);
+                self.state
+                    .lock()
+                    .unwrap()
+                    .update_file_task(name, TASK_DIR_SEND, 0, "已取消");
+                return;
+            }
         }
         // 找不到在途会话不是"没什么可做的"，而是"用户点了一下却什么都没发生"——必须说。
         self.push_error(format!(
@@ -3173,23 +3198,27 @@ impl Worker {
             }
         }
 
-        // 1) 待发路径 → 启动（需已配对；分块流式发送需 TCP 已绑定）
-        if let Some(path) = self.pending_send.clone() {
-            if self.send.is_some() {
-                // 已有任务在传：不并发（队列语义留待后续里程碑），明确提示而不是静默丢弃
-                self.pending_send = None;
-                self.push_error("已有文件正在传输，请等当前任务结束后再发送".to_string());
-            } else {
+        // 1) 队列头 → 启动（需已配对；分块流式发送需 TCP 已绑定）
+        //    一次发一叠时**逐个发**：当前这条没收尾就不开下一条。
+        //    并发发多个文件会让两个 FILE_META 同时在途，接收端的落盘顺序、
+        //    断点续传索引和界面上的行号全都要重新对齐，收益远小于代价。
+        if self.send.is_none() {
+            let next = self.pending_send.front().cloned();
+            if let Some(path) = next {
                 let (paired, bound) = self
                     .engine
                     .as_ref()
                     .map(|e| (e.is_paired(), e.is_tcp_bound()))
                     .unwrap_or((false, false));
                 if !paired {
-                    self.pending_send = None;
-                    self.push_error("未配对，文件未发送（请先在连接页与手机配对）".to_string());
+                    // 没配对：这一条发不出去，**留在队列里**并出声。
+                    // 直接丢掉的话，用户补好配对后发现自己点的文件一个都没发出去。
+                    self.pending_send.pop_front();
+                    self.push_error(format!(
+                        "未配对，{path} 没有发送（请先在连接页与手机配对后重试）"
+                    ));
                 } else if bound {
-                    self.pending_send = None;
+                    self.pending_send.pop_front();
                     if let Err(e) = self.start_send(&path) {
                         self.push_error(e);
                     }
@@ -3635,7 +3664,7 @@ impl Worker {
             st.update_file_task(&s.name, TASK_DIR_SEND, 0, "已取消");
             st.push_toast("发送已取消".to_string(), format!("{}：设备已解绑", s.name));
         }
-        let queued = self.pending_send.take();
+        let queued: Vec<String> = self.pending_send.drain(..).collect();
         let sessions = std::mem::take(&mut self.recv);
         let mut dropped: Vec<(String, u64, std::path::PathBuf)> =
             Vec::with_capacity(sessions.len());
@@ -3666,8 +3695,14 @@ impl Worker {
                 })
                 .collect();
             let mut st = self.state.lock().unwrap();
-            if let Some(p) = queued {
+            if let Some(p) = queued.first() {
                 st.push_error(format!("{p} 还在排队就被取消：设备已解绑"));
+            }
+            if queued.len() > 1 {
+                st.push_error(format!(
+                    "这一批还有 {} 个文件在排队，一并作废（设备已解绑）",
+                    queued.len() - 1
+                ));
             }
             for (name, _, _) in &dropped {
                 st.update_file_task(name, TASK_DIR_RECV, 0, "已取消");

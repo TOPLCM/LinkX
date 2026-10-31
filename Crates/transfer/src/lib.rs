@@ -34,18 +34,3 @@ pub enum TransferError {
     #[error("协议违规: {0}")]
     Protocol(String),
 }
-
-/// 本 crate 版本（FFI 上行用）
-pub fn version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn version_is_exposed() {
-        assert_eq!(version(), env!("CARGO_PKG_VERSION"));
-    }
-}

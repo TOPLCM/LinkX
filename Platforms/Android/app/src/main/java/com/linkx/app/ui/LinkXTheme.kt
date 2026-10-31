@@ -1,3 +1,7 @@
+/**
+ * 主题：深浅两套配色与 Compose 主题定义。
+ */
+
 package com.linkx.app.ui
 
 import androidx.compose.foundation.isSystemInDarkTheme

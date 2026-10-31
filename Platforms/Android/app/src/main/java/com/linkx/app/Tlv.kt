@@ -1,3 +1,7 @@
+/**
+ * TLV 与协议常量：与 Rust 侧逐项一致，改一处必须同步三处（check-protocol-sync 会校验）。
+ */
+
 package com.linkx.app
 
 /**

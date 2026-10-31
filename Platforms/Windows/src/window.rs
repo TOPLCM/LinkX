@@ -171,7 +171,10 @@ pub(crate) fn request_exit(hwnd: HWND) {
 }
 
 /// 供非 UI 线程请求退出：跨线程只传 `isize`，不在别的线程上持有 `HWND`
-#[allow(dead_code)] // 唯一调用方在 agent-debug 控制面，交付构建不带该 feature
+///
+/// **只在调试面存在**：唯一调用方是 `agent-debug` 控制面，交付构建不带该 feature，
+/// 于是这个函数在交付构建里压根不存在 —— 由编译器保证，而不是靠 `allow(dead_code)` 掩盖。
+#[cfg(feature = "agent-debug")]
 pub(crate) fn request_exit_from_raw(hwnd_raw: isize) {
     request_exit(HWND(hwnd_raw as *mut c_void));
 }
@@ -597,14 +600,26 @@ fn on_left_click(x: i32, y: i32) {
         HitTarget::FocusSendPath => st.input_focus = FOCUS_SEND_PATH,
         HitTarget::FocusManualIp => st.input_focus = FOCUS_MANUAL_IP,
         HitTarget::SendFile => {
-            st.send_file_req = true;
-            // 空路径不在此处报错：worker 会给出可读错误（避免 UI 直接判空造成重复逻辑）
+            // 发的是**整份待发清单**（外加输入框里手打的那一条），不是一个路径
+            let mut paths = st.take_send_picks();
+            let typed = st.send_path_input.trim().to_string();
+            if !typed.is_empty() {
+                if !paths.iter().any(|p| p.eq_ignore_ascii_case(&typed)) {
+                    paths.push(typed.clone());
+                }
+                st.send_path_input.clear();
+            }
+            st.send_file_req = Some(paths);
+            // 空清单不在此处报错：worker 会给出可读错误（避免 UI 直接判空造成重复逻辑）
         }
         HitTarget::BrowseFile => browse_now = true,
         HitTarget::ChooseInbox => inbox_now = true,
         HitTarget::CancelFile(i) => {
-            // 行下标 → 行键 `(方向, 文件名)`：绘制与命中同用 `is_cancellable`，掐断由 worker 做
-            if let Some(t) = st.file_tasks.get(i) {
+            // 行下标 → 行键：前几行是待发清单（「移除」），后面才是传输记录（「取消」）
+            let picks = st.send_picks.len();
+            if i < picks {
+                st.remove_send_pick(i);
+            } else if let Some(t) = st.file_tasks.get(i - picks) {
                 st.cancel_file_req = Some((t.direction, t.name.clone()));
             }
         }
@@ -773,10 +788,15 @@ fn on_left_click(x: i32, y: i32) {
     if browse_now {
         // 系统对话框必须放锁后弹：一路模态到用户点完，握着锁会让 worker 的锁请求全部卡死
         use crate::dialog::Pick;
-        match crate::dialog::pick_file(hwnd, "选择要发送到手机的文件") {
-            // 只填路径、不代发：发送仍由用户点「发送到手机」确认，
-            // 免得手滑选错文件就直接把大文件推出去。
-            Pick::Picked(p) => set_send_path(p.to_string_lossy().into_owned()),
+        match crate::dialog::pick_files(hwnd, "选择要发送到手机的文件（可一次多选）")
+        {
+            // 只填清单、不代发：发送仍由用户点「发送到手机」确认
+            Pick::Picked(paths) => {
+                let added = add_send_paths(paths);
+                if added == 0 {
+                    push_error("这些文件已经在待发清单里了".to_string());
+                }
+            }
             Pick::Cancelled => {}
             Pick::Failed(why) => push_error(format!("系统文件对话框不可用：{why}")),
         }
@@ -786,22 +806,29 @@ fn on_left_click(x: i32, y: i32) {
         use crate::dialog::Pick;
         match crate::dialog::pick_folder(hwnd, "选择收件目录（手机发来的文件落这里）")
         {
-            Pick::Picked(dir) => match std::fs::create_dir_all(&dir) {
-                Ok(()) => {
-                    let Some(arc) = shared_state() else { return };
-                    let mut st = arc.lock().unwrap();
-                    st.inbox_dir = dir.display().to_string();
-                    let saved = settings::Settings::from_state(&st);
-                    drop(st);
-                    saved.save();
-                    let mut st = arc.lock().unwrap();
-                    st.push_toast(
-                        "收件目录已更改".to_string(),
-                        format!("手机发来的文件将落到：{}", dir.display()),
-                    );
+            Pick::Picked(mut dirs) => {
+                // 选文件夹只会回一个目录
+                let Some(dir) = dirs.drain(..).next() else {
+                    push_error("系统文件夹对话框没有返回目录".to_string());
+                    return;
+                };
+                match std::fs::create_dir_all(&dir) {
+                    Ok(()) => {
+                        let Some(arc) = shared_state() else { return };
+                        let mut st = arc.lock().unwrap();
+                        st.inbox_dir = dir.display().to_string();
+                        let saved = settings::Settings::from_state(&st);
+                        drop(st);
+                        saved.save();
+                        let mut st = arc.lock().unwrap();
+                        st.push_toast(
+                            "收件目录已更改".to_string(),
+                            format!("手机发来的文件将落到：{}", dir.display()),
+                        );
+                    }
+                    Err(e) => push_error(format!("收件目录用不了（{}）: {e}", dir.display())),
                 }
-                Err(e) => push_error(format!("收件目录用不了（{}）: {e}", dir.display())),
-            },
+            }
             Pick::Cancelled => {}
             Pick::Failed(why) => push_error(format!("系统文件夹对话框不可用：{why}")),
         }
@@ -811,24 +838,31 @@ fn on_left_click(x: i32, y: i32) {
         use crate::dialog::Pick;
         match crate::dialog::pick_folder(hwnd, "选择导出目录（手机原图会落到这里）")
         {
-            Pick::Picked(dir) => match std::fs::create_dir_all(&dir) {
-                Ok(()) => {
-                    let Some(arc) = shared_state() else { return };
-                    let mut st = arc.lock().unwrap();
-                    let ids: Vec<u64> = st.album.selected.clone();
-                    if ids.is_empty() {
-                        st.push_error("选中状态在这一步被清掉了，没有请求任何原图".to_string());
-                    } else {
-                        st.album.plan_fetch(
-                            &ids,
-                            dir.display().to_string(),
-                            crate::state::AlbumPurpose::Export,
-                        );
-                        st.ui_rev += 1;
+            Pick::Picked(mut dirs) => {
+                // 选文件夹只会回一个目录
+                let Some(dir) = dirs.drain(..).next() else {
+                    push_error("系统文件夹对话框没有返回目录".to_string());
+                    return;
+                };
+                match std::fs::create_dir_all(&dir) {
+                    Ok(()) => {
+                        let Some(arc) = shared_state() else { return };
+                        let mut st = arc.lock().unwrap();
+                        let ids: Vec<u64> = st.album.selected.clone();
+                        if ids.is_empty() {
+                            st.push_error("选中状态在这一步被清掉了，没有请求任何原图".to_string());
+                        } else {
+                            st.album.plan_fetch(
+                                &ids,
+                                dir.display().to_string(),
+                                crate::state::AlbumPurpose::Export,
+                            );
+                            st.ui_rev += 1;
+                        }
                     }
+                    Err(e) => push_error(format!("导出目录用不了（{}）: {e}", dir.display())),
                 }
-                Err(e) => push_error(format!("导出目录用不了（{}）: {e}", dir.display())),
-            },
+            }
             // 取消不是失败，但也得留一句：否则用户以为"点了没反应"
             Pick::Cancelled => {
                 push_error("已取消相册导出（没有选择目录，原图请求没有发出）".to_string())
@@ -1087,14 +1121,32 @@ unsafe fn run_shell_drag(hwnd: HWND, paths: &[String]) -> Result<(), String> {
     }
 }
 
-/// 填待发送路径（对话框与拖放两个入口共用）。
-fn set_send_path(path: String) {
+/// 把一批选中的文件加进待发清单，返回**新加进去的条数**。
+/// 清单存在界面状态里（不是 worker 的队列）：worker 只在用户点「发送到手机」时才拿到这批路径。
+fn add_send_paths(paths: Vec<std::path::PathBuf>) -> usize {
     let Some(arc) = shared_state() else {
-        push_error("界面状态尚未就绪，路径没有填入".to_string());
-        return;
+        push_error("界面状态尚未就绪，文件没有加入清单".to_string());
+        return 0;
     };
-    let mut st = arc.lock().unwrap();
-    st.send_path_input = path;
+    let picks: Vec<crate::state::SendPick> = paths
+        .into_iter()
+        .map(|p| {
+            let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            let name = p
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "待发送文件".to_string());
+            crate::state::SendPick {
+                path: p.to_string_lossy().into_owned(),
+                name,
+                size,
+            }
+        })
+        .collect();
+    let added = arc.lock().unwrap().add_send_picks(picks);
+    post_state_changed(arc.lock().unwrap().hwnd_raw);
+    added
 }
 
 fn push_error(msg: String) {
@@ -1163,14 +1215,13 @@ fn answer_close_prompt(hwnd: HWND, choice: CloseChoice) {
     let _ = unsafe { InvalidateRect(hwnd, None, true) };
 }
 
-/// 把文件拖进窗口 → 填成待发送路径（不代发，与「选择…」一致）。
-/// 一次只取第一个：引擎侧同一时刻只有一个 `SendTask`；哪些没被采纳必须说清楚，否则像丢了文件
+/// 把文件拖进窗口 → 加进待发清单（不代发，与「选择…」一致）。拖进来的**一整批**都收下。
 fn on_drop_files(hwnd: HWND, hdrop_raw: *mut c_void) {
     if hdrop_raw.is_null() {
         return;
     }
     let hdrop = HDROP(hdrop_raw);
-    let mut first: Option<String> = None;
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
     let mut skipped = 0usize;
     let mut dirs = 0usize;
     let total;
@@ -1198,43 +1249,44 @@ fn on_drop_files(hwnd: HWND, hdrop_raw: *mut c_void) {
                 dirs += 1;
                 continue;
             }
-            if first.is_none() {
-                first = Some(path);
-            }
+            files.push(std::path::PathBuf::from(path));
         }
         // 系统分配的 drop 结构必须显式释放，否则每次拖拽漏一块进程堆
         DragFinish(hdrop);
     }
     let usable = total - skipped - dirs;
     let Some(arc) = shared_state() else { return };
+    let added = if files.is_empty() {
+        0
+    } else {
+        add_send_paths(files)
+    };
     let mut st = arc.lock().unwrap();
-    match first {
-        None => st.push_error(if total == 0 {
+    if added == 0 {
+        st.push_error(if total == 0 {
             "系统没给出拖入的文件，请改用「选择…」".to_string()
         } else {
             format!("拖进来的 {total} 项里没有可发送的文件（文件夹不算），请改用「选择…」")
-        }),
-        Some(path) => {
-            st.send_path_input = path;
-            st.active_tab = render::TAB_FILES;
-            st.list_hover = None;
-            st.input_focus = FOCUS_NONE;
-            // 备注合成一条：错误列表只留 `MAX_ERRORS` 条，拆成三行会把真正的错误挤掉
-            let mut notes: Vec<String> = Vec::new();
-            if usable > 1 {
-                notes.push(format!(
-                    "一次只能发送一个文件，已填入第 1 个（共拖入 {usable} 个）"
-                ));
-            }
-            if dirs > 0 {
-                notes.push(format!("{dirs} 个文件夹不能直接发送"));
-            }
-            if skipped > 0 {
-                notes.push(format!("{skipped} 项读不出文件名，已跳过"));
-            }
-            if !notes.is_empty() {
-                st.push_error(notes.join("；"));
-            }
+        });
+    } else {
+        st.active_tab = render::TAB_FILES;
+        st.list_hover = None;
+        st.input_focus = FOCUS_NONE;
+        // 备注合成一条：错误列表只留 `MAX_ERRORS` 条，拆成三行会把真正的错误挤掉
+        let mut notes: Vec<String> = Vec::new();
+        if usable > 1 {
+            notes.push(format!(
+                "已加入待发清单 {added} 个文件（共拖入 {usable} 个）"
+            ));
+        }
+        if dirs > 0 {
+            notes.push(format!("{dirs} 个文件夹不能直接发送"));
+        }
+        if skipped > 0 {
+            notes.push(format!("{skipped} 项读不出文件名，已跳过"));
+        }
+        if !notes.is_empty() {
+            st.push_error(notes.join("；"));
         }
     }
     drop(st);
@@ -1267,12 +1319,13 @@ fn on_mouse_move(hwnd: HWND, x: i32, y: i32, left_down: bool) {
     let Some(arc) = shared_state() else {
         return;
     };
-    let (nav, list, clickable) = {
+    let (hover, clickable) = {
         let st = arc.lock().unwrap();
         let env = theme::detect(hwnd, st.theme);
-        let (n, l) = render::hover_at(&st, &env, x, y);
+        // 悬停与命中走**同一份区域映射**（render::region_at）：命中返回什么，悬停就返回什么
+        let h = render::hover_at(&st, &env, x, y);
         let c = render::hit_test(&st, &env, x, y).is_some();
-        (n, l, c)
+        (h, c)
     };
     unsafe {
         let c = if clickable {
@@ -1286,11 +1339,10 @@ fn on_mouse_move(hwnd: HWND, x: i32, y: i32, left_down: bool) {
     }
     let changed = {
         let mut st = arc.lock().unwrap();
-        if st.nav_hover == nav && st.list_hover == list {
+        if st.list_hover == hover {
             false
         } else {
-            st.nav_hover = nav;
-            st.list_hover = list;
+            st.list_hover = hover;
             true
         }
     };
@@ -1306,8 +1358,7 @@ fn clear_hover(hwnd: HWND) {
     };
     let changed = {
         let mut st = arc.lock().unwrap();
-        let c = st.nav_hover.is_some() || st.list_hover.is_some();
-        st.nav_hover = None;
+        let c = st.list_hover.is_some();
         st.list_hover = None;
         c
     };

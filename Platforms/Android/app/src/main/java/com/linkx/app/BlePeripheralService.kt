@@ -1,3 +1,7 @@
+/**
+ * BLE 外设服务：手机端做 Peripheral 广播自有服务，等电脑来连（配对与通知转发走这条路）。
+ */
+
 package com.linkx.app
 
 import android.app.NotificationChannel

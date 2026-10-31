@@ -33,7 +33,7 @@ LinkX/
 ## 根文件
 
 - `README.md` 产品简介：能做什么、怎么上手、技术框架、许可。
-- `CHANGELOG.md` 逐版变更（0.1.0 → 0.5.1）。
+- `CHANGELOG.md` 逐版变更（0.1.0 → 0.5.2）。
 - `DIRECTORY.md` 本文件。
 - `LICENSE` GPL-3.0-or-later 的 FSF 官方全文。
 - `THIRD_PARTY_LICENSES.md` 第三方代码与素材登记，以及随产物分发的义务。
@@ -61,9 +61,11 @@ TCP 连接与读写线程、加密字节流的分帧、抗重放与背压窗口�
 `Licenses/localsend/`）。
 
 `storage` 是本地库，用 bundled SQLite，不起外部进程；`schema.sql` 是结构单一源，编译时嵌入。
-`ffi` 是给两端壳的接缝：C ABI 门面、事件队列、安卓 JNI 入口。`debuglog` 与 `debugd` 是埋点
-和本机回环调试控制面，只在 `agent-debug` 特性下编译，默认关闭。`app` 是自检入口，
-`cargo run -p linkx-app` 打印 N/N PASS。
+`ffi` 是核心的对外门面：只留版本常量（跨端版本号的单一真源）与安卓 JNI 导出
+（`feature = "jni"`，构建 `linkx_core.so` 时启用）；原先的 C ABI 句柄与 TX 事件队列没有生产调用方，
+已撤除 —— 安卓走 JNI 导出，Windows 直接调 Rust 侧，两端都不经过 C ABI。
+`debuglog` 与 `debugd` 是埋点和本机回环调试控制面，只在 `agent-debug` 特性下编译，默认关闭。
+`app` 是自检入口，`cargo run -p linkx-app` 打印 N/N PASS。
 
 ## Platforms/
 
@@ -77,17 +79,30 @@ TCP 连接与读写线程、加密字节流的分帧、抗重放与背压窗口�
 系统消息走 `src/toast.rs`：弹 Windows 自己的通知卡（卡上两颗按钮靠 `linkx://` 回到主进程，
 口令一次性），弹不出去才回落 `src/tray.rs` 的托盘气泡；`src/ipc.rs` 是"第二次启动只转交、
 不再开一个窗口"的那条命名管道，也是按钮激活参数的入口。
-两份安装器源各喂一种打包引擎，内容要一起改：`installers/LinkX-v4.wxs` 给 Windows 上的 WiX v5
-（正式交付包由它出，含中文向导、防火墙规则、许可页、`linkx://` 注册），
-`installers/LinkX.wxs` 给 Linux 上的 wixl（交叉出包链路，向导是英文）。
+安装器源只有一份：`installers/LinkX-v4.wxs`，喂给 Windows 上的 WiX Toolset v5
+（正式交付包由它出，含中文向导、防火墙规则、许可页、`linkx://` 注册）。
+原先另有一条 Linux/wixl 链路（配 `installers/LinkX.wxs`），那份源自陈"携带 6 处已知向导缺陷"、
+从未在真机上走过安装向导，已随开源清理一起下线 —— 现在只有一条出包链路，也就没有"改了一份忘了另一份"的问题。
 
-手机端是 Kotlin + Jetpack Compose，经 JNI 调同一份核心。`MainActivity.kt` 是各屏与底部导航，
-`LinkxRuntime.kt` 与 `NativeCore.kt` 是和 Native 核心的接缝，`BlePeripheralService.kt` 是蓝牙
-外设角色与前台服务（广播必须带设备名，电脑端按名字认领设备并自动重连），`NlsService.kt` 是
-通知监听（正文与标题不进日志，只转发 10 分钟内的条目），`BootReceiver.kt` 负责开机与覆盖安装后
-拉起链路服务。其余按能力分文件：剪贴板同步、通知回复能力判定、媒体控制、相册、电量、
-身份与偏好存取、功能开关、前置条件检查。`res/drawable/` 的矢量全部由 `svg/` 生成，
-与电脑端同几何；`app/proguard-rules.pro` 必须 keep 住 JNI 入口。
+手机端是 Kotlin + Jetpack Compose，经 JNI 调同一份核心。
+
+`MainActivity.kt` 只留 Activity 本体、底部导航与通用组件；七个页面各占一个文件，在
+`ui/` 下：`ConnectPage`（连接）、`NotificationsPage`（通知）、`ClipboardPage`（剪贴板）、
+`FilesPage`（文件与待发清单）、`MediaPage`（媒体）、`SettingsPage`（设置）、
+`AboutPage`（关于，含第三方许可清单入口），配色在 `ui/LinkXTheme.kt`。
+
+和核心的接缝分两层：`LinkxRuntime.kt` 是事件泵与状态机的持有者，它下面按能力分成
+`FileTransfer.kt`（文件传输）、`TcpChannel.kt`（TCP 通道）、`LanDiscovery.kt`（局域网发现），
+共用类型放在 `RuntimeTypes.kt`；`NativeCore.kt` 是 JNI 入口本身。
+
+`BlePeripheralService.kt` 是蓝牙外设角色与前台服务（广播必须带设备名，电脑端按名字认领设备
+并自动重连），`NlsService.kt` 是通知监听（正文与标题不进日志，只转发 10 分钟内的条目），
+`BootReceiver.kt` 负责开机与覆盖安装后拉起链路服务。其余按能力分文件：剪贴板同步
+（`ClipboardSync.kt`、以及给它借焦点的 `ClipboardSendActivity.kt`）、通知回复能力判定
+（`NotifCapability.kt`）、媒体控制（`MediaControl.kt`）、相册（`AlbumProvider.kt`）、
+电量（`BatteryMonitor.kt`）、身份与偏好存取（`IdentityStore.kt`、`AppPrefs.kt`）、
+功能开关（`Features.kt`）、前置条件检查（`LinkPrereqs.kt`）。
+`res/drawable/` 的矢量全部由 `svg/` 生成，与电脑端同几何；`app/proguard-rules.pro` 必须 keep 住 JNI 入口。
 
 ## Docs/
 
@@ -137,6 +152,9 @@ Python 脚本只用标准库。构建出包：`build-mingw-windows.sh` 与 `buil
 `check-compose-kotlin-pair.sh` 查 Compose 与 Kotlin 版本配对，`check-release-clean.sh` 查交付产物
 无调试残留，`check-install-single.sh` 查安装份数与作用域，`check-comment-hygiene.sh` 查注释卫生。
 `check-release-ledger.py` 核对 `Release/README.md` 登记的哈希与大小，本地出包后跑，不进 CI。
+两个 PowerShell 门禁只在 Windows 上跑：`check-msi-tables.ps1` 用 Windows Installer 的 COM 接口
+读 MSI 的表，核对安装作用域、目录挂载、卸载清理项、防火墙动作、许可页闸门与随包许可文件；
+`check-msi-uninstall.ps1` 核对卸载前的退出保护与收尾动作表级接线。
 
 图标链是 `svg_assets.py` 加两个模板 `launcher_icon.tmpl`、`vector_icon.tmpl`。
 真机验收与测量：`check-file-transfer.py`（电脑端→手机端）、`check-phone-to-pc.py`（手机端→电脑端）、
