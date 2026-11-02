@@ -267,25 +267,29 @@ jobs:
               || { echo "缺少 lib/$abi/liblinkx_core.so"; exit 1; }
             echo "✅ APK 内含 lib/$abi/liblinkx_core.so"
           done
-      # 签名身份判据：证书 SHA-256 必须等于钉死的那把长期身份（0.5.2 起对外发布用的就是它，
-      # 值取自 `apksigner verify --print-certs Release/Android/LinkX-0.5.2-release.apk`）。
+      # 签名身份判据：证书 SHA-256 必须等于钉死的那把长期身份（0.5.2 起对外发布用的就是它）。
       # 上面"有没有注入机密"是过程断言，这一行才是结果断言 —— 过程对但指纹不对
       # （机密被换过、或仓库里混进别的钥匙）同样会炸掉老用户的配对。
+      # ⚠ 取值不能锚 `Signer #1 …` 这种前缀：apksigner 的措辞随 build-tools 版本变——
+      #   本机 34 打 `Signer #1 certificate SHA-256 digest:`，CI runner 打 `V3.0 Signer: certificate SHA-256 digest:`，
+      #   0.5.3 第一次上架就是被这个错解析挡住的（明明签名正确，却报"取不到"）。
+      #   现在只认"SHA-256 digest"这一行冒号后的十六进制，且要求恰好一行，多签或读不出都算不通过。
       - name: 签名证书指纹核对
         id: cert
         run: |
           APK="$(ls Release/Android/*-release.apk | head -1)"
           BT="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)"
-          GOT="$("$BT/apksigner" verify --print-certs "$APK" \
-                  | sed -n 's/^Signer #1 certificate SHA-256 digest: *//p')"
-          echo "实际指纹 = ${GOT:-取不到}"
+          RAW="$("$BT/apksigner" verify --print-certs "$APK" | grep -i 'SHA-256 digest' || true)"
+          N=$(printf '%s\n' "$RAW" | grep -c . || true)
+          GOT="$(printf '%s\n' "$RAW" | sed -n 's/.*SHA-256 digest:[[:space:]]*//p' | head -1 | tr 'A-F' 'a-f')"
+          echo "实际指纹 = ${GOT:-取不到}（命中 $N 行）"
           echo "期望指纹 = $APK_CERT_SHA256"
-          if [ "${GOT:-}" = "$APK_CERT_SHA256" ]; then
+          if [ "${GOT:-}" = "$APK_CERT_SHA256" ] && [ "$N" = "1" ]; then
             echo "deliverable=1" >> "$GITHUB_OUTPUT"
             echo "✅ 签名身份与历史版本一致，可用于覆盖升级"
           else
             echo "deliverable=0" >> "$GITHUB_OUTPUT"
-            echo "⚠ 签名身份不同：这份 APK 只用于验证流水线，不会被附到 Release 上"
+            echo "⚠ 签名身份不同或读不出：这份 APK 只用于验证流水线，不会被附到 Release 上"
           fi
       - uses: actions/upload-artifact@v4
         with:
