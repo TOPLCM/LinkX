@@ -1,0 +1,362 @@
+# 发布流水线（CD）：把一次 `v*` 标签推送变成一条**草稿** Release，附上两端安装包与 SHA-256。
+#
+# 为什么停在草稿：发布与否是人的决定（这条流水线不代替任何人对外上架）。它只保证
+# "标签一推，三个安装包就在草稿里等着，且每一项都过过门禁"，点 Publish 的那一下仍在人手里。
+#
+# 与本地出包的分工：exe 在 ubuntu 上交叉编译（跟 CI 的 windows-shell job 同一条命令，
+# 也保证交付的是带图标的 gnu 产物）；MSI 只能在 Windows 宿主上打（WiX 不在 Linux 上产 MSI），
+# 所以 msi job 用 windows runner + 下载上一步的 exe，不重编；APK 走本地同一条出包脚本。
+#
+# CI（build.yaml）管"改动能不能编译、门禁过不过"，这条管"交付产物长什么样"。两者互不替代。
+name: Release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RUST_VERSION: "1.97.1"
+  PROTOC_VERSION: "21.12"
+  WIX_VERSION: "5.0.2"
+  # 0.5.2 起对外发布用的那把签名身份（覆盖升级不丢配对的前提就是它不变）。
+  APK_CERT_SHA256: "85a11f55cf03e016287b2a38911a570bdcadfe9c4a2d0fa0427f2ac98009a58e"
+
+jobs:
+  # 先钉住"标签与真源版本号是不是同一个"：标签 v0.5.4 配 Cargo.toml 0.5.3 的产物
+  # 是最难被发现的一类事故（包里的关于页、安装器属性页、Release 标题会互相矛盾）。
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      release: ${{ steps.v.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          VER="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          [ -n "$VER" ] || { echo "❌ Cargo.toml 里读不到版本号（单一真源坏了）"; exit 1; }
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            if [ "${GITHUB_REF_NAME}" != "v$VER" ]; then
+              echo "❌ 推的标签是 ${GITHUB_REF_NAME}，Cargo.toml 写的是 $VER —— 二者必须同一个版本"
+              exit 1
+            fi
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "✅ 标签 ${GITHUB_REF_NAME} 与 Cargo.toml 一致，产物出来后建草稿 Release"
+          else
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "✅ 手工触发：只出产物与校验值，不碰 Releases 页（版本 $VER）"
+          fi
+
+  # ── Windows 本体：交叉编译出交付用的 gnu exe ──────────────────────────
+  exe:
+    runs-on: ubuntu-latest
+    needs: preflight
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: x86_64-pc-windows-gnu
+      - run: sudo apt-get update && sudo apt-get install -y mingw-w64
+      - name: protoc（协议 crate 的 build.rs 需要）
+        run: |
+          curl -sSL -o /tmp/protoc.zip \
+            https://github.com/protocolbuffers/protobuf/releases/download/v${{ env.PROTOC_VERSION }}/protoc-${{ env.PROTOC_VERSION }}-linux-x86_64.zip
+          unzip -q /tmp/protoc.zip -d /tmp/protoc
+          echo "PROTOC=/tmp/protoc/bin/protoc" >> $GITHUB_ENV
+      - name: 编译 linkx.exe（release / gnu）
+        run: cargo build --release --target x86_64-pc-windows-gnu --manifest-path Platforms/Windows/Cargo.toml
+      - name: 交付构建零调试残留（exe）
+        run: bash Scripts/check-release-clean.sh Target/x86_64-pc-windows-gnu/release/linkx.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linkx-exe
+          path: Target/x86_64-pc-windows-gnu/release/linkx.exe
+          if-no-files-found: error
+
+  # ── ARM64 本体：MSVC 交叉不过去，只能在 Windows 宿主上原生出 ────────────
+  # 与 x64 那条不是一条命令换个 target 的事：arm64 要 MSVC 的 link.exe + Windows SDK 的
+  # ARM64 库与 rc.exe（图标资源），MinGW-w64 根本没有 aarch64-w64-mingw32 这条线。
+  exe-arm64:
+    runs-on: windows-latest
+    needs: preflight
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-pc-windows-msvc
+      - name: protoc（build.rs 生成协议代码要）
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -OutFile protoc.zip `
+            https://github.com/protocolbuffers/protobuf/releases/download/v${{ env.PROTOC_VERSION }}/protoc-${{ env.PROTOC_VERSION }}-win64.zip
+          Expand-Archive protoc.zip -DestinationPath "$PWD\protoc"
+          "PROTOC=$PWD\protoc\bin\protoc.exe" >> $env:GITHUB_ENV
+      # 先确认工具链真的在，再开编：runner 缺 ARM64 组件时报"链接失败 / 找不到 rc.exe"
+      # 这种话，看不出根因；这里直接把该补的组件 id 说清楚。
+      - name: 检查 MSVC 的 ARM64 工具与 Windows SDK
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw "找不到 vswhere.exe，无法定位 VS 安装" }
+          $inst = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationPath
+          if (-not $inst) {
+            throw "runner 上没有 VC.Tools.ARM64（ARM64 交叉工具链）。要么给 windows-2022 镜像补装该组件，" +
+                  "要么把这条 job 关掉；不要退回到「x64 包给 ARM 电脑装」——那正是这个包要解决的问题。"
+          }
+          "VC 安装位置：$inst"
+          $rc = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\rc.exe" -ErrorAction SilentlyContinue |
+                Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $rc) { throw "Windows SDK 的 rc.exe 不在，图标资源编不出来（build.rs 会 panic）" }
+          "rc.exe：$($rc.FullName)"
+          # rc.exe 在不代表能链接：SDK 的 ARM64 导入库是另一个组件（Windows11SDK 装不带 arm64 也照样有 rc.exe），
+          # 缺它的话失败点是 link.exe 那句"无法解析的符号"，看不出根因。
+          $lib = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Lib\*\um\arm64\kernel32.lib" -ErrorAction SilentlyContinue |
+                 Select-Object -First 1
+          if (-not $lib) { throw "Windows SDK 没有 ARM64 的导入库（um\arm64）：给 runner 补 Microsoft.VisualStudio.Component.Windows11SDK.22621 或对应的 SDK ARM64 组件" }
+          "SDK ARM64 导入库：$($lib.FullName)"
+      - name: 编译 linkx.exe（release / aarch64-pc-windows-msvc）
+        shell: bash
+        run: bash Scripts/build-msvc-windows.sh
+      - name: 交付构建零调试残留（arm64 exe）
+        shell: bash
+        env:
+          LINKX_GATE_TARGET: aarch64-pc-windows-msvc
+        run: bash Scripts/check-release-clean.sh Target/aarch64-pc-windows-msvc/release/linkx.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linkx-exe-arm64
+          path: Target/aarch64-pc-windows-msvc/release/linkx.exe
+          if-no-files-found: error
+
+  # ── MSI：两个架构各一份，复用上面编好的 exe ────────────────────────────
+  msi:
+    runs-on: windows-latest
+    needs: [exe, exe-arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: x86_64-pc-windows-gnu
+      - name: protoc（build.rs / cargo tree 都要能解析协议 crate）
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -OutFile protoc.zip `
+            https://github.com/protocolbuffers/protobuf/releases/download/v${{ env.PROTOC_VERSION }}/protoc-${{ env.PROTOC_VERSION }}-win64.zip
+          Expand-Archive protoc.zip -DestinationPath "$PWD\protoc"
+          "PROTOC=$PWD\protoc\bin\protoc.exe" >> $env:GITHUB_ENV
+      # 出包脚本零依赖预取：feature_gate 里的 `cargo tree` 要能解析依赖图。
+      - name: cargo fetch
+        run: cargo fetch --locked
+      - name: WiX Toolset ${{ env.WIX_VERSION }} + util 扩展
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version "${{ env.WIX_VERSION }}"
+          # GITHUB_PATH 的改动只对**后续步骤**生效，本步骤里 wix 还没进 PATH，必须用全路径调。
+          $wix = Join-Path $env:USERPROFILE ".dotnet\tools\wix.exe"
+          if (-not (Test-Path $wix)) { throw "dotnet 装完找不到 $wix" }
+          & $wix extension add -g "WixToolset.Util.wixext/${{ env.WIX_VERSION }}"
+          "$env:USERPROFILE\.dotnet\tools" >> $env:GITHUB_PATH
+      - uses: actions/download-artifact@v4
+        with:
+          name: linkx-exe
+          path: Target/x86_64-pc-windows-gnu/release
+      - uses: actions/download-artifact@v4
+        with:
+          name: linkx-exe-arm64
+          path: Target/aarch64-pc-windows-msvc/release
+      # 两个架构各打一份：脚本按 ARCH 挑编译链与产物名，表级判据各自跑一遍。
+      # SKIP_EXE_BUILD 在这里是安全的 —— 两份 exe 都由同一条流水线的上一个 job 从同一个 commit 编出来。
+      - name: 打包 MSI x64（含表级契约与卸载保护校验）
+        shell: bash
+        env:
+          SKIP_EXE_BUILD: "1"
+          ARCH: "x64"
+        run: bash Scripts/build-msi-windows.sh
+      - name: 打包 MSI arm64（含表级契约与卸载保护校验）
+        shell: bash
+        env:
+          SKIP_EXE_BUILD: "1"
+          ARCH: "arm64"
+        run: bash Scripts/build-msi-windows.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linkx-msi
+          path: Release/Windows/*.msi
+          if-no-files-found: error
+
+  # ── APK：与本地同一条出包脚本，一个包里带两套 ABI ───────────────────────
+  apk:
+    runs-on: ubuntu-latest
+    needs: preflight
+    outputs:
+      deliverable: ${{ steps.cert.outputs.deliverable }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-linux-android, armv7-linux-androideabi
+      - name: cargo-ndk
+        run: cargo install cargo-ndk --version 4.1.2 --locked
+      - name: Android NDK r27c
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          add-to-path: false
+      - name: protoc
+        run: |
+          curl -sSL -o /tmp/protoc.zip \
+            https://github.com/protocolbuffers/protobuf/releases/download/v${{ env.PROTOC_VERSION }}/protoc-${{ env.PROTOC_VERSION }}-linux-x86_64.zip
+          unzip -q /tmp/protoc.zip -d /tmp/protoc
+          echo "PROTOC=/tmp/protoc/bin/protoc" >> $GITHUB_ENV
+      - name: JDK 21 + Gradle 8.7
+        uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 21 }
+      - uses: gradle/actions/setup-gradle@v3
+        with: { gradle-version: "8.7" }
+      # 交付签名密钥必须在出包**之前**注入。脚本找不到钥匙时会用同一个 dname 现生成一把，
+      # 于是签名变 ⇒ 老用户覆盖安装被拒（INSTALL_FAILED_UPDATE_INCOMPATIBLE）⇒ 只能卸载重装、配对全丢。
+      # 没配这枚机密时不许悄悄换钥匙：产物照常出（够验证流水线），但打上"不可对外发布"的标记，
+      # 由下面那道指纹闸门把它挡在 Release 附件之外。
+      - name: 交付签名密钥（必须在出包前）
+        env:
+          KS_B64: ${{ secrets.LINKX_APK_KEYSTORE_B64 }}
+        run: |
+          mkdir -p LOCAL_KEYS
+          if [ -n "${KS_B64:-}" ]; then
+            printf '%s' "$KS_B64" | base64 -d > LOCAL_KEYS/linkx-test.jks
+            echo "✅ 已注入交付签名密钥（与历史版本同一把）"
+          else
+            echo "⚠ 未设 secrets.LINKX_APK_KEYSTORE_B64：本次 APK 由脚本现生成测试密钥签名，"
+            echo "  只能用来验证流水线，**不能对外发布**（换钥匙覆盖安装就会丢配对）。"
+          fi
+      - name: 出交付 APK（双 ABI）
+        env:
+          GRADLE_ONLINE: "1"
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > Platforms/Android/local.properties
+          bash Scripts/build-android-apk.sh --release
+      - name: 两套 ABI 都在包里
+        # 清单先落到变量再判：`unzip -l | grep -q` 里 grep 一命中就关管道，unzip 收 SIGPIPE(141)，
+        # 而 Actions 的 bash 默认开 pipefail —— 包明明是对的也会被读成"缺 ABI"。
+        run: |
+          APK="$(ls Release/Android/*-release.apk | head -1)"
+          LIST="$(unzip -l "$APK")"
+          for abi in arm64-v8a armeabi-v7a; do
+            printf '%s\n' "$LIST" | grep -qE "lib/$abi/liblinkx_core\.so" \
+              || { echo "缺少 lib/$abi/liblinkx_core.so"; exit 1; }
+            echo "✅ APK 内含 lib/$abi/liblinkx_core.so"
+          done
+      # 签名身份判据：证书 SHA-256 必须等于钉死的那把长期身份（0.5.2 起对外发布用的就是它，
+      # 值取自 `apksigner verify --print-certs Release/Android/LinkX-0.5.2-release.apk`）。
+      # 上面"有没有注入机密"是过程断言，这一行才是结果断言 —— 过程对但指纹不对
+      # （机密被换过、或仓库里混进别的钥匙）同样会炸掉老用户的配对。
+      - name: 签名证书指纹核对
+        id: cert
+        run: |
+          APK="$(ls Release/Android/*-release.apk | head -1)"
+          BT="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)"
+          GOT="$("$BT/apksigner" verify --print-certs "$APK" \
+                  | sed -n 's/^Signer #1 certificate SHA-256 digest: *//p')"
+          echo "实际指纹 = ${GOT:-取不到}"
+          echo "期望指纹 = $APK_CERT_SHA256"
+          if [ "${GOT:-}" = "$APK_CERT_SHA256" ]; then
+            echo "deliverable=1" >> "$GITHUB_OUTPUT"
+            echo "✅ 签名身份与历史版本一致，可用于覆盖升级"
+          else
+            echo "deliverable=0" >> "$GITHUB_OUTPUT"
+            echo "⚠ 签名身份不同：这份 APK 只用于验证流水线，不会被附到 Release 上"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linkx-apk
+          path: Release/Android/*-release.apk
+          if-no-files-found: error
+
+  # ── 草稿 Release：两个附件 + 校验值 + CHANGELOG 那一段正文 ───────────────
+  draft:
+    runs-on: ubuntu-latest
+    needs: [preflight, exe, exe-arm64, msi, apk]
+    # 写了 if 之后"needs 全绿"就不再是隐含条件，所以把**每个** needs 的结果都显式补齐：
+    # 只判 msi/apk 时，exe 那条腿是靠"msi 会被跳过"间接挡住的——间接判据在改依赖图的那天就失效了。
+    if: |
+      needs.preflight.outputs.release == 'true'
+      && needs.exe.result == 'success' && needs.exe-arm64.result == 'success'
+      && needs.msi.result == 'success' && needs.apk.result == 'success'
+    steps:
+      - name: 签名身份对不上的产物不许进 Releases
+        run: |
+          if [ "${{ needs.apk.outputs.deliverable }}" != "1" ]; then
+            echo "❌ 这份 APK 的签名证书与历史版本不是同一把（多半是没配 secrets.LINKX_APK_KEYSTORE_B64）。"
+            echo "   拿它发布 = 老用户覆盖安装被拒、手机上的配对全丢。宁可不出这条 Release。"
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+      # 落到台账约定的目录名上（而不是 dist/），好让下面那道"交付集三件齐"的门禁真的能跑：
+      # 它查的就是 `Release/<平台>/LinkX-<版本>-<形态>` 这三个文件名。
+      - uses: actions/download-artifact@v4
+        with:
+          name: linkx-msi
+          path: Release/Windows
+      - uses: actions/download-artifact@v4
+        with:
+          name: linkx-apk
+          path: Release/Android
+      - name: 交付集三件齐（版本同步门禁）
+        # 原先这条只在本机出包时跑，CI 里没人跑 —— 于是"文档写三件、实际只发两件"这种事
+        # 只能靠人眼在 Releases 页上发现。
+        run: bash Scripts/check-version-sync.sh --require-docs
+      - name: 取正文（人写的，流水线不代笔）
+        run: |
+          VER="${{ needs.preflight.outputs.version }}"
+          # 正文来自 `Release/Notes/v<版本>.md`，那个文件本身就是正文（首行固定 `v<版本>更新日志：`）。
+          # 为什么不让流水线从 CHANGELOG 抠一段：对外那套话有五条格式规矩（一行一条「关键词：短句」、
+          # 不出现协议号/算法名/文件路径、顺序固定、校验值不堆进正文），机器抠出来的必然写成技术说明文
+          # —— 那种正文已经被退回过一次。缺文件就停：说明这版还没交代清楚，草稿 Release 不该存在。
+          NOTE="Release/Notes/v${VER}.md"
+          [ -f "$NOTE" ] || { echo "❌ 缺 $NOTE：先按模板把这版的对外正文写出来，再推标签。"; exit 1; }
+          head -1 "$NOTE" | grep -qx "v${VER}更新日志：" \
+            || { echo "❌ $NOTE 首行不是「v${VER}更新日志：」（模板第一条：小写 v + 半角冒号）"; exit 1; }
+          cp "$NOTE" body.md
+          echo "--- 正文 ---"; cat body.md
+      - name: 打印两个包的校验值（只进运行日志）
+        # 逐文件显式 printf，不用 `sha256sum *`：MSYS 的 coreutils 会给文件名加前导 `*`（二进制模式标记），
+        # 同一行脚本在两种宿主上读出来的名字就不一致。台账里的正式校验值仍只维护在 `Release/README.md`。
+        run: |
+          # 只算这一版那两个目录里的东西：`Release/Archive/**` 也在 git 跟踪里，从 Release/ 往下找
+          # 会把历版安装包一起打哈希，日志里就分不清哪三行是这次的交付物。
+          ( cd Release && find Windows Android -maxdepth 1 -type f \( -name '*.msi' -o -name '*.apk' \) -print0 \
+            | xargs -0 -I{} sh -c 'printf "%s  %s\n" "$(sha256sum "{}" | cut -d" " -f1)" "{}"' )
+      - name: 建草稿（已存在就盖附件）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VER="${{ needs.preflight.outputs.version }}"
+          MSI_X64="$(ls Release/Windows/*-x64.msi | head -1)"
+          MSI_ARM="$(ls Release/Windows/*-arm64.msi | head -1)"
+          APK="$(ls Release/Android/*-release.apk | head -1)"
+          # 三个附件：两个电脑端架构 + 一个双 ABI 手机端包；校验值走仓库里的 `Release/README.md`，
+          # 不再挂第四份文件。
+          FILES=("$MSI_X64" "$MSI_ARM" "$APK")
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${FILES[@]}" --clobber
+            gh release edit "$TAG" --draft --title "LinkX $VER" --notes-file body.md
+            echo "已更新既有 Release $TAG（仍为草稿）"
+          else
+            gh release create "$TAG" "${FILES[@]}" \
+              --draft --title "LinkX $VER" --notes-file body.md
+            echo "已创建草稿 Release $TAG"
+          fi
+          gh release view "$TAG" --json isDraft,url,assets

@@ -141,6 +141,57 @@ def ensure_fixture(path, size_kb=None, seed_text=None):
     return path
 
 
+def dev_rows():
+    """手机侧文件任务列表，形如 `名字#序号=Done,…`；没有控制面时返回 None。"""
+    a = get(AND + "/state")
+    if not a:
+        return None
+    return str(((a or {}).get("host") or {}).get("file_rows") or "")
+
+
+def dev_rows_ids(rows, name):
+    """当前列表里这个名字**已有**的行序号集合。发送前先拍一份，用来认出本轮新增的那一行。"""
+    ids = set()
+    for row in (rows or "").split(","):
+        if row.startswith(name + "#"):
+            ids.add(row.split("#", 1)[1].split("=", 1)[0])
+    return ids
+
+
+def dev_size(name):
+    r = adb("shell", f"stat -c %s {DEV_DIR}/{name}")
+    out = r.stdout.strip()
+    return int(out) if out.isdigit() else None
+
+
+def wait_received(name, expect_bytes, before_ids, timeout=120):
+    """等**这一轮**在收端落定：新出现的行序号记成 Done，且设备侧文件尺寸到位。
+
+    只等发端队列排空是不够的：2.5 GB 那两次实测都是发端先闲、收端还在写，
+    脚本立刻 sha256sum 读到半截文件，把一次逐字节正确的传输报成"内容不一致"。
+    也不能只看"有没有 Done"——手机上同名文件的旧行会留在任务列表里，
+    不比对行序号就会立刻返回，等于什么都没等（第二次误报就是这么来的）。
+    返回 (本轮 Done, 尺寸到位)；没有安卓控制面时 Done 为 None，只按尺寸判。
+    """
+    deadline = time.time() + timeout
+    done = None
+    sized = False
+    while time.time() < deadline:
+        rows = dev_rows()
+        if rows is None:
+            done = None
+        else:
+            fresh = [r for r in rows.split(",")
+                     if r.startswith(name + "#") and r.endswith("=Done")
+                     and r.split("#", 1)[1].split("=", 1)[0] not in before_ids]
+            done = bool(fresh)
+        sized = dev_size(name) == expect_bytes
+        if sized and done is not False:
+            return done, sized
+        time.sleep(2)
+    return done, sized
+
+
 def check_one(local, label):
     name = os.path.basename(local)
     want = sha256_file(local)
@@ -151,22 +202,30 @@ def check_one(local, label):
         print(f"  ❌ {label:<12} 设备侧旧文件删不掉，本用例的前提不成立")
         return False
     before = set((get(WIN + "/state") or {}).get("errors") or [])
+    before_ids = dev_rows_ids(dev_rows(), name)
     r = post("/action/send-file", path=local.replace("\\", "/"))
     ok, errs = wait_win_idle()
     new_errs = [e for e in errs if e not in before]
-    # 本机发完 ≠ 设备写完：接收是边写边落盘的，只读一次哈希会撞在半截文件上，
-    # 把"还在收尾"误报成"内容不一致"。等到一致或超时为止。
+    # 上限按时长给：小文件 120 s 足够，2.5 GB 按 2 MB/s 的保守速度折算再加 60 s 余量。
+    # 这是"最多等多久"，不是"一定等这么久"—— 收端一记 Done 且尺寸到位就返回。
+    size = os.path.getsize(local)
+    budget = max(120, size // 2_000_000 + 60)
+    done, sized = wait_received(name, size, before_ids, budget)
     got, err = dev_sha(name)
-    deadline = time.time() + 60
-    while got != want and time.time() < deadline:
-        time.sleep(2)
-        got, err = dev_sha(name)
+    if got != want:
+        # 尺寸对了但哈希还差：/storage 走 FUSE，刚关掉的写有可能过一两秒才读得到。
+        deadline = time.time() + min(budget, 60)
+        while got != want and time.time() < deadline:
+            time.sleep(2)
+            got, err = dev_sha(name)
     good = got == want
     mark = "✅" if good else "❌"
-    print(f"  {mark} {label:<12} {name}  {os.path.getsize(local):>9} B")
+    print(f"  {mark} {label:<12} {name}  {size:>9} B")
     if not good:
         print(f"     本机 sha={want[:24]}…")
         print(f"     设备 sha={str(got)[:24]}…  {'已发出但设备没有' if got is None else '内容不一致'}")
+        print(f"     收端落定：本轮 Done={done}（None=没有安卓控制面可比）尺寸到位={sized} "
+              f"发端队列已空={ok} 预算={budget} s")
         if err:
             print("     " + err.replace(chr(10), chr(10) + "     "))
         if new_errs:

@@ -278,8 +278,12 @@
   <!-- 主程序 + HKCU\SOFTWARE\LinkX 版本/路径信息 -->
   <Fragment>
     <Component Id="MainExecutable" Directory="INSTALLFOLDER" Guid="C6E12426-9B4F-40F5-99AC-4F1695815BBC">
-      <File Id="LinkXExe" Name="linkx.exe"
-            Source="Target/x86_64-pc-windows-gnu/release/linkx.exe"/>
+      <!-- 本体路径由 `Scripts/build-msi-windows.sh` 按 ARCH 注入（@EXE@）：x64 → gnu 产物、
+           arm64 → msvc 产物。这里**写死一条路径就等于让两个安装包共用同一个 exe**——
+           0.5.3 真机审查抓到过：包名与 -arch 都是 arm64，装进去的却是 x64 本体，
+           而当时所有判据都在"编出来的那份 exe"上做文章，没一条看过包里的 payload。
+           现在由 Scripts/check-msi-payload.ps1 从包里取出本体核哈希与 PE 机器码。 -->
+      <File Id="LinkXExe" Name="linkx.exe" Source="@EXE@"/>
       <!--
         GPL-3.0 §4 / Apache-2.0 §4(a) 都要求分发时随附许可副本；许可页第 2 屏的文案也承诺
         「see the LICENSE file in the installation folder」—— 缺该文件即为虚假陈述。

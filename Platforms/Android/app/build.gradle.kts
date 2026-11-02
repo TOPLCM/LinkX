@@ -12,9 +12,12 @@ android {
         applicationId = "com.linkx.app"
         minSdk = 26          // Android 8.0（4.3.2）
         targetSdk = 34
-        versionCode = 15
-        versionName = "0.5.2"
-        ndk { abiFilters += "arm64-v8a" }   // J5：arm64 only
+        versionCode = 16
+        versionName = "0.5.3"
+        // 0.5.3 兼容性：一个 APK 同时带两套 ABI，系统按设备自动取用对应的那份 .so。
+        // 不发"只有 32 位"的包 —— Android 13+ 部分 64 位 SoC 已砍掉 32 位支持，
+        // 那种包反而把大多数用户挡在门外；也不发"只有 arm64"的包 —— 32 位老机装不上。
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }
 
     buildTypes {

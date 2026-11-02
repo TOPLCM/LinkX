@@ -1,5 +1,8 @@
 name: CI
 on: [push, pull_request]
+# 公开仓的 CI 只需要读代码：不给写权限，fork 的 PR 也就拿不到能改仓库的令牌。
+permissions:
+  contents: read
 jobs:
   core:
     runs-on: ubuntu-latest
@@ -69,11 +72,12 @@ jobs:
     needs: core
     steps:
       - uses: actions/checkout@v4
-      - name: Rust 工具链 + aarch64-linux-android
+      - name: Rust 工具链 + aarch64-linux-android + armv7-linux-androideabi
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
-          targets: aarch64-linux-android
+          # 0.5.3 兼容性：一个 APK 带两套 ABI，32 位老机与 64 位新机共用同一个产物。
+          targets: aarch64-linux-android, armv7-linux-androideabi
       - name: cargo-ndk（把 Rust 核心打成安卓 .so）
         run: cargo install cargo-ndk --version 4.1.2 --locked
       - name: Android NDK r27c
@@ -99,12 +103,18 @@ jobs:
         run: |
           echo "sdk.dir=$ANDROID_HOME" > Platforms/Android/local.properties
           bash Scripts/build-android-apk.sh --release
-      - name: 校验 APK 已打包 liblinkx_core.so
+      - name: 校验 APK 内含两套 ABI 的 liblinkx_core.so
+        # 清单先落变量再判：Actions 的 bash 默认 pipefail，`unzip -l | grep -q` 命中即关管道，
+        # unzip 收到 SIGPIPE(141) 会把一条正确的判据读成失败。
         run: |
           APK="$(ls Release/Android/*-release.apk | head -1)"
-          unzip -l "$APK" | grep -q 'lib/arm64-v8a/liblinkx_core.so' \
-            || { echo "缺少 lib/arm64-v8a/liblinkx_core.so"; exit 1; }
-          echo "✅ APK 内含 liblinkx_core.so: $APK"
+          LIST="$(unzip -l "$APK")"
+          for abi in arm64-v8a armeabi-v7a; do
+            printf '%s\n' "$LIST" | grep -qE "lib/$abi/liblinkx_core\.so" \
+              || { echo "缺少 lib/$abi/liblinkx_core.so"; exit 1; }
+            echo "✅ APK 内含 lib/$abi/liblinkx_core.so"
+          done
+          echo "产物：$APK"
       # 安卓交付物是唯一带 JNI 调试符号面的产物，这道检查必须在 CI 上跑。
       - name: 交付构建零调试残留（APK 内 .so）
         run: bash Scripts/check-release-clean.sh --apk-so "$(ls Release/Android/*-release.apk | head -1)"
@@ -180,3 +190,26 @@ jobs:
       # fuzz 有自己的依赖锁（Tests/fuzz），不进交付产物，但同样会拉到有漏洞的版本，一并扫。
       - name: fuzz 依赖漏洞
         run: cargo audit --file Tests/fuzz/Cargo.lock --ignore RUSTSEC-2023-0071
+  # ── 汇总闸门：给分支保护用的一条稳定检查名 ──────────────────────────
+  # run 的状态本来就是所有 job 的合取（任何一条红，整体就红），所以这里不是"再判一次成败"，
+  # 而是给外面一个**不用随 workflow 改动而改**的必过检查：把 Settings → Branches →
+  # required checks 填 `全部门禁通过` 这一个名字就行，逐条列六个 job 名迟早漏一条。
+  # skipped / cancelled 在这里一律算不过：runner 抽风、被人手工取消、needs 没满足而被跳过，
+  # 都不能被读成"这一版没问题"。
+  all-green:
+    name: 全部门禁通过
+    runs-on: ubuntu-latest
+    needs: [core, windows-shell, android, windows-host-tests, jni-gate, supply-chain]
+    if: always()
+    steps:
+      - name: 六条 job 必须全是 success
+        env:
+          RESULTS: "core=${{ needs.core.result }} windows-shell=${{ needs.windows-shell.result }} android=${{ needs.android.result }} windows-host-tests=${{ needs.windows-host-tests.result }} jni-gate=${{ needs.jni-gate.result }} supply-chain=${{ needs.supply-chain.result }}"
+        run: |
+          echo "$RESULTS"
+          bad=0
+          for kv in $RESULTS; do
+            [ "${kv#*=}" = "success" ] || { echo "  ✗ $kv"; bad=1; }
+          done
+          [ "$bad" = 0 ] || { echo "❌ 有门禁未通过（fail / skipped / cancelled 都算）"; exit 1; }
+          echo "✅ 六条门禁全部 success"

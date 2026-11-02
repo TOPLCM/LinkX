@@ -89,7 +89,10 @@ bash Scripts/check-release-clean.sh --apk-so <APK 路径>
 
 做法是对产物字节直接断言，而不是相信「配置里说关了」：取产物的可打印串
 （没有 `strings` 时退化为按字节筛），命中控制面符号或只在调试路径里出现的依赖即失败。
-Android 那条会解出 `lib/arm64-v8a/liblinkx_core.so` 与 `classes.dex` 分别扫。
+Android 那条会把 APK 里**每一套 ABI** 的 `lib/<abi>/liblinkx_core.so` 各解出来扫一遍，再扫 `classes.dex`
+（0.5.3 起一个包里是 `arm64-v8a` 与 `armeabi-v7a` 两份；32 位那份出自另一条链接命令线，
+"arm64 干净"推不出它也干净）。缺哪一套都算失败，要复核只有单套 ABI 的历史归档时把
+`LINKX_EXPECT_ABIS` 设成那一套的名字。
 命中的模式列在脚本里，这里不复述，改一处就能同步。
 
 同一份脚本还带一条反向断言：必须命中一个产品自己的符号，否则判定为扫错了文件或产物是旧的。

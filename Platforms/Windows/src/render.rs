@@ -4367,7 +4367,7 @@ fn paint_album(hdc: HDC, e: &Env, st: &UiState, w: i32) {
             st.album.per_page,
             st.album.total,
             st.album.selected.len(),
-            st.album.thumbs.len(),
+            st.album.ready_thumbs(),
             mb
         )
         .to_string()

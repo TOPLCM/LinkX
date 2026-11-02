@@ -79,7 +79,10 @@ if [ "${1:-}" = "--require-docs" ]; then
   else
     die "$DOC_BASE 当前交付版本=$DOCVER 与 Cargo.toml=$VERSION 不一致（出包前必须对齐）"
   fi
-  for f in Release/Windows/LinkX-$VERSION-x64.msi Release/Android/LinkX-$VERSION-release.apk; do
+  # 交付集就是这三个：x64 与 ARM64 两个电脑端包 + 一个双 ABI 手机端包。
+  # 少一个就当场报，别等到 Releases 页上才发现"这版怎么没有 ARM64 包"。
+  for f in Release/Windows/LinkX-$VERSION-x64.msi Release/Windows/LinkX-$VERSION-arm64.msi \
+           Release/Android/LinkX-$VERSION-release.apk; do
     [ -f "$f" ] || die "缺少交付产物 $f"
   done
 fi

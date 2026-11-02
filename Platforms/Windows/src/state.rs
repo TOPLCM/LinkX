@@ -72,11 +72,30 @@ pub(crate) const ALBUM_THUMB_BYTES_MAX: usize = 6 * 1024 * 1024;
 /// 同时在途请求上限（FIFO）：不设上限时一次翻页把 24 个请求压给手机，解码队列满了后到的先回
 pub(crate) const ALBUM_THUMB_INFLIGHT: usize = 4;
 pub(crate) const ALBUM_THUMB_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
-/// 拖出载荷保留数的软上限与**硬顶**（见 `AlbumView::drag_ready`）：留 0 张大文件永远拖不出去，
-/// 留得多就是往临时目录堆几 GB 视频。多选拖出的淘汰会绕开选中的那几张，全选逐张预取能一路
-/// 绕开软上限，所以还要硬顶兜住（一张视频 200 MB 量级）
+/// 等清单的结局线。手机侧的 `AlbumProvider.requestList` 在相册任务队列满时**只写本机日志、
+/// 一帧都不回**（电脑没有"清单专用错误帧"可收），没有这条线界面就永远停在"正在向手机请求第 N 页"，
+/// 而 `loading` 还挡着进页自动重试。清单是一页几十条元数据，20 秒不回就是没在回。
+pub(crate) const ALBUM_LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+/// 原图"还没开始"的提醒线。**只罚连 META 都没到的**：一旦手机交来 FILE_META 就不再看这条线，
+/// 因为一张 2 GB 的视频原图本来就要跑几分钟。超线**只提醒、不撤路由**——手机侧排队 4 批时
+/// 尾号那张等的可能就是几分钟，撤了路由反而会把晚到的好图当"不属于任何请求"拒掉。
+pub(crate) const ALBUM_FULL_STALL: std::time::Duration = std::time::Duration::from_secs(300);
+/// 手机侧单批原图上限（`AlbumProvider.MAX_FULL_BATCH`）。**发送侧按这个数切片**，而不是
+/// "只发前 64 张、剩下的不说"：那样选中顺序不变，再点一次导出的还是同样那 64 张，
+/// 后面的永远取不到，重复要回来的那张还会在目录里变成 `xxx (1)`。
+pub(crate) const ALBUM_FULL_BATCH_MAX: usize = 64;
+/// 一次点导出真正能吞下的量：手机侧同时只排 4 批（`MAX_PENDING_FULL_BATCHES`）× 单批上限。
+/// 超过就是本机该当场说清楚的，而不是发出去等它回话。
+pub(crate) const ALBUM_FULL_CLICK_MAX: usize = ALBUM_FULL_BATCH_MAX * 4;
+/// 拖出载荷保留数的**软上限**（见 `AlbumView::drag_ready`）：留 0 张大文件永远拖不出去，
+/// 留得多就是往临时目录堆几 GB 视频。淘汰时先挑没被选中的下手——选中的那批是用户明确要
+/// 一次拖出去的东西，上限只防"随手乱点"，不防"真要多选"。
 pub(crate) const ALBUM_DRAG_KEEP: usize = 2;
-pub(crate) const ALBUM_DRAG_KEEP_HARD: usize = 6;
+/// 拖出载荷的保留预算按**字节**算，不按张数。以前是一条"最多 6 张"的硬顶，而多选拖出要求
+/// "选中的每一张同时在本地"：第 7 张到货时会把第 1 张的载荷删掉，于是选 9 张**永远凑不齐**——
+/// 每次拖出去都报"有几张没取回来"，补发完又把更早的挤掉，转圈也转不到头。
+/// 真机 0.5.3 第二轮抓到：相册 9 张全选，只有 6 张挂着「可拖出」。
+pub(crate) const ALBUM_DRAG_BYTES_MAX: u64 = 2 * 1024 * 1024 * 1024;
 
 /// 相册清单里的一条（`AlbumItem` 的界面投影；协议结构体不进 UI 状态，否则 UI 依赖 prost 类型）
 #[derive(Debug, Clone)]
@@ -143,6 +162,20 @@ pub(crate) enum AlbumPurpose {
     Drag,
 }
 
+/// 一次"把这张原图取回来"的登记。**带时间戳是因为路由曾经只会进不会出**：手机侧排队满或
+/// 单张读不到时它一帧都不回（`AlbumProvider.requestFull` 只写手机本机日志），路由就永久留在表里，
+/// 那一格既导不出也预取不动，只能重启进程——和孤儿 Pending 是同一个形状的洞。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AlbumRoute {
+    pub purpose: AlbumPurpose,
+    pub asked_at: Instant,
+    /// 手机第一次交来这张的 FILE_META 的时刻。`None` = 还没开始，停滞提醒只管这一段；
+    /// 一旦开始就不再看它——一张 2 GB 的视频原图本来就要跑几分钟。
+    pub started_at: Option<Instant>,
+    /// 停滞提醒只说一次：每 200 毫秒喊一遍"手机没回"会把用户淹死，也会把这条判据变成噪音。
+    pub reported: bool,
+}
+
 /// 相册页状态：清单在内存、缩略图**只在内存**（产品口径"关掉就没有"，这条路径上
 /// 不允许任何缩略图写盘，只有导出/拖出的原图落盘）
 #[derive(Debug, Default)]
@@ -153,6 +186,8 @@ pub(crate) struct AlbumView {
     /// 当前页按每页多少张取回的：翻页必须沿用这个数，否则 resize 后页边界移动、中间照片被永久跳过
     pub per_page: u32,
     pub loading: bool,
+    /// `loading` 的计时起点，只能由 `set_loading` 改：两个字段各写各的就会出现"转圈没人喊停"
+    pub loading_at: Option<Instant>,
     /// 手机侧原话逐字显示："权限没给""相册为空""读失败"是三件事，收敛成"加载失败"就丢了可行动信息
     pub error: String,
     pub thumbs: HashMap<u64, ThumbEntry>,
@@ -161,8 +196,13 @@ pub(crate) struct AlbumView {
     pub seq: u64,
     pub selected: Vec<u64>,
     pub export_dir: String,
-    /// 原图落盘路由：album_id → 用途。没登记的 id 来了就是**意外**，必须报错而不是顺手丢进收件目录
-    pub routes: HashMap<u64, AlbumPurpose>,
+    /// 原图落盘路由：album_id → 登记（用途 + 时间戳）。没登记的 id 来了就是**意外**，
+    /// 必须报错而不是顺手丢进收件目录
+    pub routes: HashMap<u64, AlbumRoute>,
+    /// 这次会话里**已经导出成功**的照片 id。只服务一件事：一次选超过 256 张时，
+    /// 第二次点「导出」要接着往下发，而不是把同样的前 256 张再要一遍（那既慢又会在目录里
+    /// 留同名带序号的副本）。它不是"这台机器上导出过什么"的账本，重启就清空。
+    pub exported: HashSet<u64>,
     /// 本机**主动撤销**过的拖出：原图可能已经在路上，到货时要能区分"手机乱发"（拦住报错）
     /// 和"我自己撤了"（安静丢掉）
     pub cancelled: HashSet<u64>,
@@ -208,6 +248,69 @@ impl AlbumView {
     pub(crate) fn drop_failed_thumbs(&mut self) {
         self.thumbs
             .retain(|_, e| !matches!(e.slot, ThumbSlot::Failed(_)));
+    }
+
+    /// 丢掉"没有在途记录的 `Pending` 格"。这里的不变量是 **`Pending` ⇒ 一定有一条在途记录**：
+    /// 翻页、点刷新、离开页签都会自增代际，旧代际的在途记录被摘掉（迟到的应答也会被丢弃后不再计数），
+    /// 而 `needs_thumb` 故意不把 `Pending` 当成"要重发"——于是这些孤儿格永远停在"载入中…"，
+    /// 且点刷新也救不回来（上面那条只清 `Failed`）。0.5.3 真机首轮就撞在这个洞上：
+    /// 一页 9 张里恰好 4 张卡死，4 = 缩略图并发上限，也就是换代际那一刻仍在途的全部。
+    /// 返回是否真丢了东西，调用方据此决定要不要重绘。
+    pub(crate) fn drop_orphan_pending(&mut self, inflight: &[u64]) -> bool {
+        let before = self.thumbs.len();
+        self.thumbs
+            .retain(|id, e| !matches!(e.slot, ThumbSlot::Pending) || inflight.contains(id));
+        before != self.thumbs.len()
+    }
+
+    /// 清单请求的"在等"状态与计时**必须一起改**：手机侧相册任务队列满时 `requestList` 只写它自己的
+    /// 日志、一帧都不回，没有计时就没有结局（`list_stalled` 也就永远不成立）。
+    pub(crate) fn set_loading(&mut self, on: bool) {
+        self.loading = on;
+        self.loading_at = if on { Some(Instant::now()) } else { None };
+    }
+
+    /// 等清单等到该给个结局了没有。判据线见 `ALBUM_LIST_TIMEOUT`。
+    pub(crate) fn list_stalled(&self, now: Instant) -> bool {
+        match self.loading_at {
+            Some(at) => now.duration_since(at) > ALBUM_LIST_TIMEOUT,
+            None => false,
+        }
+    }
+
+    /// 手机交来这张原图的 FILE_META：路由从"没开始"变成"在跑"，此后不再受停滞判据约束。
+    pub(crate) fn mark_route_started(&mut self, id: u64) {
+        if let Some(r) = self.routes.get_mut(&id) {
+            if r.started_at.is_none() {
+                r.started_at = Some(Instant::now());
+            }
+        }
+    }
+
+    /// 登记过、手机却连 META 都没交过来、且**还没提醒过**的原图张数。调用方据此说一句就够，
+    /// **不许撤路由**：尾号那张可能只是在手机侧排队（一张 2 GB 视频就能把后面的堵几分钟），
+    /// 撤了晚到的好图反而会被当"不属于任何请求"拒收——那是把等待换成丢文件，更坏。
+    pub(crate) fn take_stalled_full_report(&mut self, now: Instant) -> usize {
+        let mut n = 0;
+        for r in self.routes.values_mut() {
+            if r.started_at.is_none()
+                && !r.reported
+                && now.duration_since(r.asked_at) > ALBUM_FULL_STALL
+            {
+                r.reported = true;
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// 进度环的不变量：**有进度 ⇒ 有路由**。路由已经结算/撤掉而环还留着，那一格就永远转下去
+    /// （"转完=可以拖"是这环唯一的含义）。
+    pub(crate) fn drop_orphan_drag_progress(&mut self) -> bool {
+        let before = self.drag_progress.len();
+        self.drag_progress
+            .retain(|id, _| self.routes.contains_key(id));
+        before != self.drag_progress.len()
     }
 
     /// 取消一次拖出的原图预取。预取是"按下格子就发"的，而多数按下其实只是**点一下选中**，
@@ -257,12 +360,27 @@ impl AlbumView {
                 None => break,
             }
         }
-        // 硬顶：上面那条"宁可超一点"在全选逐张预取时会一路超到几十张全尺寸原图
-        while self.drag_ready.len() > ALBUM_DRAG_KEEP_HARD {
-            let (gid, old) = self.drag_ready.remove(0);
+        // 预算按字节算。超预算时先淘汰没选中的，再淘汰最旧的：选中的那张被挤掉，拖出会如实
+        // 报"这几张还没取回来"，而不是像按张数封顶那样永远凑不齐（见 `ALBUM_DRAG_BYTES_MAX`）
+        while !self.drag_ready.is_empty() && self.drag_bytes() > ALBUM_DRAG_BYTES_MAX {
+            let i = self
+                .drag_ready
+                .iter()
+                .position(|(gid, _)| !self.selected.contains(gid))
+                .unwrap_or(0);
+            let (gid, old) = self.drag_ready.remove(i);
             self.drag_progress.remove(&gid);
             let _ = std::fs::remove_file(old);
         }
+    }
+
+    /// 留在临时目录里等"再拖一次"的那批载荷占了多少字节（预算判据用）。
+    pub(crate) fn drag_bytes(&self) -> u64 {
+        self.drag_ready
+            .iter()
+            .filter_map(|(_, p)| std::fs::metadata(p).ok())
+            .map(|m| m.len())
+            .sum()
     }
 
     pub(crate) fn drag_ready_path(&self, id: u64) -> Option<String> {
@@ -323,6 +441,16 @@ impl AlbumView {
         self.thumbs.values().map(|e| e.slot.bytes()).sum()
     }
 
+    /// 真到手了几张图。状态行原来直接报 `thumbs.len()`，那是**格子数**不是图数：
+    /// 卡住的 Pending 与坏掉的 Failed 都被算进"内存里 N 张缩略图"，读数就成了假的
+    /// （真机那张截图 9 张里只有 5 张有图）。
+    pub(crate) fn ready_thumbs(&self) -> usize {
+        self.thumbs
+            .values()
+            .filter(|e| matches!(e.slot, ThumbSlot::Ready(_)))
+            .count()
+    }
+
     /// 超上限时淘汰**最旧的、当前不可见的**条目：正在看的那几张绝不能被淘汰后又在下一帧
     /// 重新请求（那会造成"图片闪一下"的循环）。条数与字节两条线都要看，红线不能靠运气
     fn evict_thumbs(&mut self) {
@@ -380,24 +508,66 @@ impl AlbumView {
 
     /// 登记一次"把这些原图取到某个目录"：目标目录 + 待收 id 集合 + 命令一起写。
     /// 导出、单张拖出、`/action/album-export` 三条入口**只走这里** —— 路由表和命令字段是
-    /// 一套状态的两个半边，各写各的就会出现"请求发出去了但路由没登记"（文件被当成意外拒掉）
-    pub(crate) fn plan_fetch(&mut self, ids: &[u64], dir: String, purpose: AlbumPurpose) {
+    /// 一套状态的两个半边，各写各的就会出现"请求发出去了但路由没登记"（文件被当成意外拒掉）。
+    /// 返回 `Some(一句话)` = 这一批没全发出去，调用方**必须**把这句话交给用户。
+    /// 为什么本机要拦：手机侧一次只排 4 批、每批 64 张，超出的那部分是**静默丢弃**的（它只写
+    /// 自己的日志，电脑收不到回话），不拦就是"导出悄悄少几张"。而"只发前 64 张、剩下请你再点
+    /// 一次"同样是假话：选中顺序不变，再点一次发的还是那 64 张，后面的永远取不到，
+    /// 重复要回来的那张还会在目录里变成 `xxx (1)`。所以这里跳过**本次会话已导出成功的**
+    /// （见 `exported`），让第二次点击真的接着往下走。
+    pub(crate) fn plan_fetch(
+        &mut self,
+        ids: &[u64],
+        dir: String,
+        purpose: AlbumPurpose,
+    ) -> Option<String> {
         if matches!(purpose, AlbumPurpose::Export) {
             self.export_dir = dir;
         }
-        for id in ids {
-            self.routes.insert(*id, purpose);
+        // 拖出不跳：那条路要的是载荷本身，跳过就等于永远拖不出去
+        let want: Vec<u64> = if matches!(purpose, AlbumPurpose::Export) {
+            ids.iter()
+                .filter(|id| !self.exported.contains(id))
+                .copied()
+                .collect()
+        } else {
+            ids.to_vec()
+        };
+        let skipped = ids.len() - want.len();
+        let served = want.len().min(ALBUM_FULL_CLICK_MAX);
+        let now = Instant::now();
+        for id in &want[..served] {
+            self.routes.insert(
+                *id,
+                AlbumRoute {
+                    purpose,
+                    asked_at: now,
+                    started_at: None,
+                    reported: false,
+                },
+            );
             // 新请求作废旧的撤单标记，否则撤单后再点同一格，第二次到货会被当成
             // "我自己撤过的"而**静默拒收**
             self.cancelled.remove(id);
         }
         match purpose {
-            AlbumPurpose::Export => self.req_full = Some(ids.to_vec()),
+            AlbumPurpose::Export => self.req_full = Some(want[..served].to_vec()),
             AlbumPurpose::Drag => {
                 self.drag_result = None;
-                self.drag_req = ids.to_vec();
+                self.drag_req = want[..served].to_vec();
             }
         }
+        let remaining = want.len() - served;
+        (remaining > 0).then(|| {
+            let mut s = format!(
+                "一次最多取 {ALBUM_FULL_CLICK_MAX} 张（手机侧同时只排 4 批、每批 {ALBUM_FULL_BATCH_MAX} 张）：\
+                 已发出 {served} 张，还有 {remaining} 张没发，等这批传完再点一次就接着往下取"
+            );
+            if skipped > 0 {
+                s += &format!("（已自动跳过之前导出成功的 {skipped} 张）");
+            }
+            s
+        })
     }
 }
 
@@ -1989,6 +2159,159 @@ mod tests {
         assert!(!v.needs_thumb(1), "已有图的不该再排队");
     }
 
+    /// 真机 0.5.3 撞到的那条：换代际把在途记录摘光，格子却还标着 `Pending`，于是"载入中…"
+    /// 永不自愈，点刷新也救不回来。判据是 `Pending ⇒ 有一条在途记录` 这条不变量。
+    #[test]
+    fn orphaned_pending_cells_self_heal() {
+        let mut v = AlbumView::default();
+        v.mark_thumb_pending(1);
+        v.mark_thumb_pending(2);
+        v.put_thumb(3, ThumbSlot::Ready(std::sync::Arc::new(vec![0xFFu8])));
+        v.put_thumb(4, ThumbSlot::Failed("链路超时".to_string()));
+        // 翻页/刷新/离开页签之后：1 还在途，2 的在途记录已随代际消失
+        assert!(v.drop_orphan_pending(&[1]), "孤儿格该被丢掉");
+        assert!(v.slot(1).is_some(), "仍在途的格子不该动");
+        assert!(!v.needs_thumb(1), "在途的不该重复排队");
+        assert!(v.needs_thumb(2), "孤儿格清空后下一轮才会重新排队");
+        assert!(
+            v.slot(3).is_some() && v.slot(4).is_some(),
+            "出过图的与报过错的都不该被扫掉"
+        );
+        assert!(!v.drop_orphan_pending(&[1]), "没有孤儿时不该谎称重绘");
+    }
+
+    /// 清单这条等待必须有结局：手机侧队列满时 `requestList` 一帧都不回。
+    #[test]
+    fn album_list_wait_has_a_deadline() {
+        use std::time::{Duration, Instant};
+        let mut v = AlbumView::default();
+        assert!(!v.list_stalled(Instant::now()), "没在等就谈不上超时");
+        v.set_loading(true);
+        assert!(v.loading_at.is_some(), "loading 与计时必须一起动");
+        assert!(!v.list_stalled(Instant::now()), "刚发出不算卡住");
+        v.loading_at = Some(Instant::now() - (ALBUM_LIST_TIMEOUT + Duration::from_secs(1)));
+        assert!(v.list_stalled(Instant::now()), "过了判据线就该给结局");
+        v.set_loading(false);
+        assert!(
+            !v.list_stalled(Instant::now()) && v.loading_at.is_none(),
+            "应答到手后计时要跟着清，否则下一轮又报一次假超时"
+        );
+    }
+
+    /// 原图路由：只管"手机连 META 都没交过来"那一段；已经开始跑的（大文件要几分钟）不许被误杀
+    #[test]
+    fn full_image_routes_that_never_start_get_settled() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        let old = now - (ALBUM_FULL_STALL + Duration::from_secs(1));
+        let mut v = AlbumView::default();
+        let route = |purpose, asked_at, started_at| AlbumRoute {
+            purpose,
+            asked_at,
+            started_at,
+            reported: false,
+        };
+        v.routes.insert(1, route(AlbumPurpose::Export, old, None));
+        v.routes
+            .insert(2, route(AlbumPurpose::Export, old, Some(old)));
+        v.routes.insert(3, route(AlbumPurpose::Drag, now, None));
+        assert_eq!(
+            v.take_stalled_full_report(now),
+            1,
+            "只有「没开始且超线」的那张该提醒"
+        );
+        assert!(
+            v.routes.contains_key(&1),
+            "提醒不许撤路由：撤了晚到的好图会被当意外拒收"
+        );
+        assert_eq!(v.take_stalled_full_report(now), 0, "同一张不该每轮再喊一遍");
+        v.mark_route_started(3);
+        assert_eq!(
+            v.take_stalled_full_report(now + ALBUM_FULL_STALL * 2),
+            0,
+            "手机答过话之后就不再是「没回」"
+        );
+    }
+
+    /// 进度环的不变量：有进度 ⇒ 有路由（结算/撤单之后环不许自己留着转）
+    #[test]
+    fn drag_ring_dies_with_its_route() {
+        let mut v = AlbumView::default();
+        assert!(
+            !v.drop_orphan_drag_progress(),
+            "空表时不该谎称自己清掉了什么"
+        );
+        v.drag_progress.insert(7, (30, 100));
+        assert!(
+            v.drop_orphan_drag_progress(),
+            "环还在而路由已经没了，就是该停的那一种"
+        );
+        v.drag_progress.insert(7, (30, 100));
+        v.routes.insert(
+            7,
+            AlbumRoute {
+                purpose: AlbumPurpose::Drag,
+                asked_at: Instant::now(),
+                started_at: None,
+                reported: false,
+            },
+        );
+        assert!(!v.drop_orphan_drag_progress(), "路由还在，环就该继续转");
+        v.routes.remove(&7);
+        assert!(v.drop_orphan_drag_progress(), "路由没了，环必须跟着停");
+        assert!(v.drag_progress.is_empty());
+    }
+
+    /// 手机侧一次吞不下这么多：本机要当场说清"还有几张没发"，而且**第二次点导出必须接着往下发**，
+    /// 不是把同样的前 256 张再要一遍（那既慢又会在目录里留下 `xxx (1)` 这种副本）。
+    #[test]
+    fn big_export_continues_instead_of_repeating() {
+        let ids: Vec<u64> = (0..300u64).collect();
+        let mut v = AlbumView::default();
+        let why = v
+            .plan_fetch(&ids, "C:/out".to_string(), AlbumPurpose::Export)
+            .expect("一次发不完就必须给一句话，不能悄悄少发");
+        assert!(why.contains("44"), "话里要带上还剩几张：{why}");
+        assert_eq!(v.routes.len(), ALBUM_FULL_CLICK_MAX, "只登记真发出去的那些");
+        assert_eq!(
+            v.req_full.as_ref().map(|x| x.len()),
+            Some(ALBUM_FULL_CLICK_MAX),
+            "命令队列与路由表必须是同一批 id"
+        );
+        for id in ids[..ALBUM_FULL_CLICK_MAX].iter() {
+            v.exported.insert(*id);
+        }
+        assert!(
+            v.plan_fetch(&ids, "C:/out".to_string(), AlbumPurpose::Export)
+                .is_none(),
+            "剩下的 44 张这次全发出去了，不该再有下半句"
+        );
+        assert_eq!(v.req_full.as_ref().map(|x| x.len()), Some(44));
+        assert_eq!(
+            v.routes.len(),
+            ALBUM_FULL_CLICK_MAX + 44,
+            "第二批同样要登记路由，否则到货会被当意外拒收"
+        );
+        let mut v2 = AlbumView::default();
+        assert!(
+            v2.plan_fetch(&ids[..10], "C:/out".to_string(), AlbumPurpose::Export)
+                .is_none(),
+            "没超就不该凭空报错"
+        );
+    }
+
+    /// 状态行那句"内存里 N 张缩略图"数的是图，不是格子
+    #[test]
+    fn ready_thumbs_counts_pictures_not_cells() {
+        let mut v = AlbumView::default();
+        v.put_thumb(1, ThumbSlot::Ready(Arc::new(vec![0u8; 1024])));
+        v.mark_thumb_pending(2);
+        v.put_thumb(3, ThumbSlot::Failed("链路超时".to_string()));
+        assert_eq!(v.thumbs.len(), 3, "格子数（旧口径）");
+        assert_eq!(v.ready_thumbs(), 1, "真到手的图");
+        assert_eq!(v.thumb_bytes(), 1024, "字节数本来就不算 Pending 与坏图");
+    }
+
     /// 红线口径：缩略图缓存的占用必须**与相册大小无关**，且正在看的那一页一张都不许被抽走
     #[test]
     fn thumb_cache_is_bounded_by_bytes_not_by_luck() {
@@ -2096,7 +2419,15 @@ mod tests {
         assert_eq!(v.drag_ready_path(4), Some(s(&d)));
         // 已留下的那一份不许被"点一下选中"的撤单顺手删掉（撤点击只管没打算拖的预取）
         v.drag_result = Some((3, Ok(s(&c))));
-        v.routes.insert(3, AlbumPurpose::Drag);
+        v.routes.insert(
+            3,
+            AlbumRoute {
+                purpose: AlbumPurpose::Drag,
+                asked_at: std::time::Instant::now(),
+                started_at: None,
+                reported: false,
+            },
+        );
         v.cancel_drag(3);
         assert!(
             c.exists(),
@@ -2104,5 +2435,32 @@ mod tests {
         );
         let _ = std::fs::remove_file(&c);
         let _ = std::fs::remove_file(&d);
+    }
+
+    /// 真机 0.5.3 第二轮抓到的：相册 9 张全选，旧口径"最多留 6 张"会让第 7 张到货时删掉第 1 张，
+    /// 于是多选拖出永远凑不齐、每次拖都报"有几张没取回来"，补发完又把更早的挤掉。
+    /// 预算改成按字节之后，9 张小图（全在选中集里）必须一张都不掉。
+    #[test]
+    fn nine_selected_payloads_all_survive_the_budget() {
+        let dir = std::env::temp_dir().join(format!("linkx-drag9-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut v = AlbumView::default();
+        let ids: Vec<u64> = (0..9u64).collect();
+        v.selected = ids.clone();
+        for i in &ids {
+            let p = dir.join(format!("{i}.jpg"));
+            std::fs::write(&p, vec![0u8; 4096]).unwrap();
+            v.keep_drag(*i, p.display().to_string());
+        }
+        let gone: Vec<u64> = ids
+            .iter()
+            .filter(|i| v.drag_ready_path(**i).is_none())
+            .copied()
+            .collect();
+        assert!(
+            gone.is_empty(),
+            "9 张全在选中集里，一张都不该被预算挤掉：丢了 {gone:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

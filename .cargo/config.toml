@@ -6,6 +6,13 @@ linker = "x86_64-w64-mingw32-gcc"
 [target.aarch64-linux-android]
 linker = "aarch64-linux-android21-clang"
 
+# ARM64 Windows 交付包：CRT 静态链。
+# 默认（msvc 目标）动态依赖 VCRUNTIME140.dll —— 那是 VC++ 运行库，不是操作系统自带组件：
+# 骁龙笔记本上没装 ARM64 版运行库时，exe 连启动都起不来，而这台机器上编得出来、测不出来。
+# 我们交付的是免运行时的单体 exe（MinGW 那条 x64 链本来就是自包含的），这里必须对齐。
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
 # 构建产物目录统一为 Target/（命名规范：目录首字母大写）
 [build]
 target-dir = "Target"

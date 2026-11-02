@@ -86,8 +86,10 @@ scan() { # scan <文件> <反向断言串> <说明> [模式…，默认 BAD_PATS
 # linkx-debugd 这个 crate 没进图，产物里就不可能有它。
 feature_gate() {
   echo "== 依赖图闸门：交付构建不得带 agent-debug =="
-  local tree
-  if ! tree="$(cargo tree -e features -p linkx-windows --target x86_64-pc-windows-gnu 2>&1)"; then
+  # 查的目标必须与这份产物一致：给 arm64 包查 gnu 目标的依赖图等于没查。
+  # 目标由出包脚本传进来（LINKX_GATE_TARGET），单独跑时默认还是交付主目标 x64/gnu。
+  local tree target="${LINKX_GATE_TARGET:-x86_64-pc-windows-gnu}"
+  if ! tree="$(cargo tree -e features -p linkx-windows --target "$target" 2>&1)"; then
     echo "  ✗ cargo tree 跑失败：$(echo "$tree" | tail -2)"
     fail=1
     return
@@ -148,15 +150,24 @@ MUST_DEX="${LINKX_MUST_SYMBOL_DEX:-nativeSendMediaState}"
 if [ "${1:-}" = "--apk-so" ]; then
   APK="${2:-}"
   [ -n "$APK" ] || { echo "用法：$0 --apk-so <apk 路径>"; exit 1; }
-  TMP="Temp/release-clean-liblinkx_core.so"
   mkdir -p Temp
-  # APK 里每个 ABI 一份 .so；交付只发 arm64-v8a，就取那一份
-  if ! unzip -p "$APK" "lib/arm64-v8a/liblinkx_core.so" > "$TMP" 2>/dev/null; then
-    echo "❌ $APK 里没有 lib/arm64-v8a/liblinkx_core.so"
-    exit 1
-  fi
-  scan "$TMP" "$MUST_SO" "APK 内 liblinkx_core.so（$APK）"
-  rm -f "$TMP"
+  # 0.5.3 起一个 APK 带两套 ABI，每套单独扫一遍：32 位那份是另一个编译器、另一条链接命令行产出的，
+  # arm64 干净不代表 v7a 干净。复核单 ABI 的历史归档时把 LINKX_EXPECT_ABIS 换成 "arm64-v8a"。
+  ENTRIES="$(unzip -Z1 "$APK" 'lib/*/liblinkx_core.so' 2>/dev/null || true)"
+  [ -n "$ENTRIES" ] || { echo "❌ $APK 里取不到任何 lib/<abi>/liblinkx_core.so"; exit 1; }
+  FOUND_ABIS=""
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    abi="$(basename "$(dirname "$entry")")"
+    FOUND_ABIS="$FOUND_ABIS $abi"
+    TMP="Temp/release-clean-liblinkx_core-$abi.so"
+    unzip -p "$APK" "$entry" > "$TMP" 2>/dev/null || { echo "  ✗ 解出 $entry 失败"; fail=1; continue; }
+    scan "$TMP" "$MUST_SO" "APK 内 $entry（$APK）"
+    rm -f "$TMP"
+  done <<< "$ENTRIES"
+  for want in ${LINKX_EXPECT_ABIS:-arm64-v8a armeabi-v7a}; do
+    case " $FOUND_ABIS " in *" $want "*) ;; *) echo "  ✗ APK 里没有 $want 那套 .so"; fail=1 ;; esac
+  done
   # .so 干净不代表 APK 干净：Kotlin 侧的 `external fun nativeDebug*` 声明还在 classes.dex 里。
   # 它们是 JNI 入口、proguard 必须 keep、R8 删不掉，所以这一层验的是"跑不跑得起来"：
   # .so 里没有对应符号时声明就是死引用（调用点已被 BuildConfig.DEBUG 折掉，

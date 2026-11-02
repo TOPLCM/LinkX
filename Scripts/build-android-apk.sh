@@ -50,43 +50,39 @@ echo "  JDK 21（$JAVA_CMD）"
 echo "  Gradle 8.7 / apksigner（$APKSIGNER）/ zipalign 就绪"
 
 echo
-echo "== 2) Rust Core .so（arm64-v8a） =="
-SO="Target/android-jni/arm64-v8a/liblinkx_core.so"
-# 陈旧产物陷阱：DEBUGD=1 却复用不带控制面的 .so，会产出"看着是调试包、控制面起不来"的 APK，故直接验符号。
-SO_HAS_DEBUGD=0
-[ -f "$SO" ] && grep -qa 'nativeDebugdStart' "$SO" && SO_HAS_DEBUGD=1
+echo "== 2) Rust Core .so（arm64-v8a + armeabi-v7a） =="
+ABIS=(arm64-v8a armeabi-v7a)
 NEED_DEBUGD=0
-# 调试变体按定义就要带控制面：NEED_DEBUGD 由 MODE 决定，不让调用者额外记环境变量。
 [ "$MODE" = "debug" ] && NEED_DEBUGD=1
 [ "${DEBUGD:-0}" = "1" ] && NEED_DEBUGD=1
-if [ "$SO_HAS_DEBUGD" != "$NEED_DEBUGD" ]; then
-  echo "  ⚠ 已有 .so 的 agent-debug 状态（$SO_HAS_DEBUGD）与本次要求（$NEED_DEBUGD）不符 → 强制重建"
-  REBUILD_CORE=1
-fi
-# 只验符号挡不住"Rust 源码改了但没重编"——Kotlin 调新 JNI 函数、旧 .so 里没有该符号，
-# 而 runCatching 会把 UnsatisfiedLinkError 吞成"返回 0"，表现成无关的假故障。故再比一次时间戳。
-if [ -f "$SO" ] && [ "${REBUILD_CORE:-0}" != "1" ]; then
+so_has_debugd() { grep -qa 'nativeDebugdStart' "Target/android-jni/$1/liblinkx_core.so" 2>/dev/null && echo 1 || echo 0; }
+# 陈旧产物有两层坑，都得逐套 ABI 各查一遍：① DEBUGD=1 却复用不带控制面的 .so，产出"名字叫
+# 调试包、控制面起不来"的 APK；② 只验符号挡不住"源码改了但没重编"——Kotlin 调新 JNI 函数而
+# 旧 .so 里没有那个符号时，runCatching 把 UnsatisfiedLinkError 吞成"返回 0"，表现成一桩无关的假故障。
+REBUILD_CORE=0
+MISSING_ABI=""
+for abi in "${ABIS[@]}"; do
+  SO="Target/android-jni/$abi/liblinkx_core.so"
+  [ -f "$SO" ] || { MISSING_ABI="$MISSING_ABI $abi"; continue; }
+  [ "$(so_has_debugd "$abi")" = "$NEED_DEBUGD" ] \
+    || { echo "  ⚠ $abi 的 agent-debug 状态与本次要求（$NEED_DEBUGD）不符 → 强制重建"; REBUILD_CORE=1; }
   NEWER="$(find Crates Proto -type f \( -name '*.rs' -o -name '*.proto' -o -name 'Cargo.toml' \) -newer "$SO" 2>/dev/null | head -1)"
-  if [ -n "$NEWER" ]; then
-    echo "  ⚠ .so 落后于源码（$NEWER）→ 强制重建 Rust Core"
-    REBUILD_CORE=1
-  fi
-fi
-
-if [ -f "$SO" ] && [ "${REBUILD_CORE:-0}" != "1" ]; then
-  echo "  复用已有 $SO（REBUILD_CORE=1 可强制重建）"
+  [ -z "$NEWER" ] || { echo "  ⚠ $abi 的 .so 落后于源码（$NEWER）→ 强制重建"; REBUILD_CORE=1; }
+done
+if [ -z "$MISSING_ABI" ] && [ "$REBUILD_CORE" != "1" ]; then
+  echo "  复用已有两套 ABI 的 .so（REBUILD_CORE=1 可强制重建）"
 else
   # DEBUGD 必须跟着本次要求传下去，否则"要求调试变体"会重建成一份仍然没有控制面的 .so。
   DEBUGD="$NEED_DEBUGD" bash Scripts/build-android-core.sh
 fi
-# 事后断言（检查器自己也要被验）：产出的 .so 真的符合本次要求才算过。
-FINAL_HAS_DEBUGD=0
-grep -qa 'nativeDebugdStart' "$SO" && FINAL_HAS_DEBUGD=1
-if [ "$FINAL_HAS_DEBUGD" != "$NEED_DEBUGD" ]; then
-  echo "❌ .so 的控制面状态（$FINAL_HAS_DEBUGD）与本次要求（$NEED_DEBUGD）不符，停在这里"
-  exit 1
-fi
-echo "  ✓ .so 控制面状态与本次要求一致（$NEED_DEBUGD）"
+# 事后断言（检查器自己也要被验）：每套产出的 .so 真的符合本次要求才算过。
+for abi in "${ABIS[@]}"; do
+  SO="Target/android-jni/$abi/liblinkx_core.so"
+  [ -f "$SO" ] || { echo "❌ 缺 $SO（build-android-core.sh 没产出这套 ABI）"; exit 1; }
+  [ "$(so_has_debugd "$abi")" = "$NEED_DEBUGD" ] \
+    || { echo "❌ $abi 的控制面状态与本次要求（$NEED_DEBUGD）不符，停在这里"; exit 1; }
+done
+echo "  ✓ 两套 ABI 的控制面状态与本次要求一致（$NEED_DEBUGD）"
 
 echo
 echo "== 3) 许可清单进 APK =="
@@ -166,7 +162,17 @@ JAVA_HOME="$JAVA_HOME_21" PATH="$JAVA_HOME_21/bin:$PATH" "$APKSIGNER" verify --p
 # 页对齐自检：签名合法、包也完整不代表装得上，`apksigner verify` 查不出未页对齐的 .so。
 "$ZIPALIGN" -c -p 4 "$APK_OUT" || { echo "❌ APK 未按要求页对齐（zipalign -c -p 失败）"; exit 1; }
 echo "  ✓ 页对齐校验通过"
-unzip -l "$APK_OUT" | grep -E 'classes.dex|lib/arm64-v8a/liblinkx_core.so' || { echo "❌ APK 缺 dex 或 .so"; exit 1; }
+# 清单先取一次再判：`unzip -l | grep -q` 里 grep 一命中就关管道，unzip 收 SIGPIPE(141)，
+# pipefail 下"在的"会被读成"不在" —— 所以要么数次数，要么像这样把清单落到变量里。
+LIST="$(unzip -l "$APK_OUT")"
+printf '%s\n' "$LIST" | grep -qE 'classes\.dex' || { echo "❌ APK 缺 dex"; exit 1; }
+# 两套 ABI 各一份，且总数正好是 2：少一份时包照样装得上、照样过验签，只有另一类机器装上才起得来。
+for abi in arm64-v8a armeabi-v7a; do
+  printf '%s\n' "$LIST" | grep -qE "lib/$abi/liblinkx_core\.so" || { echo "❌ APK 缺 lib/$abi/liblinkx_core.so"; exit 1; }
+done
+[ "$(printf '%s\n' "$LIST" | grep -cE 'lib/[^/]+/liblinkx_core\.so')" = "2" ] \
+  || { echo "❌ APK 里 liblinkx_core.so 不是正好两份（多出来的是没清理干净的旧 ABI）"; exit 1; }
+echo "  ✓ APK 内含两套 ABI 的 liblinkx_core.so"
 # 许可清单必须真的在包里；grep 不用 -q（它一命中就关管道，unzip 收 SIGPIPE，pipefail 下会误判失败）。
 LIC_IN_APK="$(unzip -l "$APK_OUT" | grep -cE 'assets/licenses/' || true)"
 [ "${LIC_IN_APK:-0}" -ge 5 ] || { echo "❌ APK 里只有 ${LIC_IN_APK:-0} 份许可清单（应为 5 份）"; exit 1; }

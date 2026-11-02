@@ -18,6 +18,9 @@ Platforms/Android/*.iml
 # 工具链真身（体积巨大，只在本机持久化，不入源码库；装法见 内部文档/工具链与换机.md）
 /LOCAL_TOOLCHAIN/
 
+# 装工具链时下的引导器本体（VS Build Tools bootstrapper 几 MB，装完就没用了）
+/LOCAL_DOWNLOADS/
+
 # WiX Toolset 本机安装副本（同上，属工具链真身，非项目源码；磁盘保留，仅不入库）
 /LOCAL_WIX/
 

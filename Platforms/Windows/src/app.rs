@@ -669,12 +669,19 @@ impl Worker {
                         }
                         let dir = linkx_debugd::query_param(query, "dir")
                             .ok_or("缺 ?dir=<导出目录绝对路径>")?;
-                        st.album
-                            .plan_fetch(&ids, dir.clone(), crate::state::AlbumPurpose::Export);
-                        Ok(format!(
-                            "已下发原图请求 {} 张 → {dir}（进度看 /state 的 file_tasks）",
-                            ids.len()
-                        ))
+                        let partial = st.album.plan_fetch(
+                            &ids,
+                            dir.clone(),
+                            crate::state::AlbumPurpose::Export,
+                        );
+                        // 回话里的张数要说**真发出去**那个数：本机一次最多只发 256 张，拿"用户选了几张"去报就会让验收得出错结论
+                        let served = st.album.req_full.as_ref().map(|v| v.len()).unwrap_or(0);
+                        Ok(match partial {
+                            Some(why) => format!("部分下发：{why}（本机拦的，不是手机侧回话）"),
+                            None => format!(
+                                "已下发原图请求 {served} 张 → {dir}（进度看 /state 的 file_tasks）"
+                            ),
+                        })
                     }
                     "restart" => {
                         // 与「重新启动」按钮同一条路径：置命令位 → 退出收尾 → `main` 拉起新实例
@@ -1493,7 +1500,7 @@ impl Worker {
     fn request_album_list(&mut self, page: u32, per_page: u32) {
         if let Err(why) = self.album_gate() {
             let mut st = self.state.lock().unwrap();
-            st.album.loading = false;
+            st.album.set_loading(false);
             st.push_error(why);
             st.ui_rev += 1;
             drop(st);
@@ -1507,7 +1514,7 @@ impl Worker {
             .unwrap_or(false);
         let mut st = self.state.lock().unwrap();
         if sent {
-            st.album.loading = true;
+            st.album.set_loading(true);
             st.album.error.clear();
             st.album.page = page;
             st.album.per_page = per_page;
@@ -1521,7 +1528,7 @@ impl Worker {
             // 新页 = 新代际：上一页仍在途的应答不能再闪进这一页
             st.album.invalidate();
         } else {
-            st.album.loading = false;
+            st.album.set_loading(false);
             st.push_error("相册清单请求未发出：通道在按下的一瞬间断了，请重试".to_string());
         }
         st.ui_rev += 1;
@@ -1547,21 +1554,41 @@ impl Worker {
             post_state_changed(self.hwnd_raw);
             return;
         }
-        let sent = self
-            .engine
-            .as_mut()
-            .map(|e| e.send_album_full_request(ids, now_ms()))
-            .unwrap_or(false);
+        // 手机侧单批只收 `MAX_FULL_BATCH` 张：整批发过去时超出的那部分会被静默丢掉，用户端就是"导出悄悄少几张"
+        let mut sent_n = 0usize;
+        let mut failed: Vec<u64> = Vec::new();
+        for chunk in ids.chunks(crate::state::ALBUM_FULL_BATCH_MAX) {
+            let ok = self
+                .engine
+                .as_mut()
+                .map(|e| e.send_album_full_request(chunk, now_ms()))
+                .unwrap_or(false);
+            if ok {
+                sent_n += chunk.len();
+            } else {
+                failed.extend(chunk.iter().copied());
+            }
+        }
         let mut st = self.state.lock().unwrap();
-        if sent {
-            let body = format!("已请求 {} 张，落盘目录：{}", ids.len(), st.album.export_dir);
+        if sent_n > 0 {
+            let body = if failed.is_empty() {
+                format!("已请求 {sent_n} 张，落盘目录：{}", st.album.export_dir)
+            } else {
+                format!(
+                    "{sent_n} 张已发出，另有 {} 张这一批没发出去，请再点一次导出",
+                    failed.len()
+                )
+            };
             st.push_toast("正在导出相册原图".to_string(), body);
-        } else {
-            // 没发出去就把路由撤掉：留着会让稍后到手的同名请求被误认成本次导出
-            for id in ids {
+        }
+        if !failed.is_empty() {
+            // 没发出去的把路由撤掉：留着会让稍后到手的同名请求被误认成本次导出
+            for id in &failed {
                 st.album.routes.remove(id);
             }
-            st.push_error("原图请求未发出：局域网通道在按下的一瞬间断了，请重试".to_string());
+            if sent_n == 0 {
+                st.push_error("原图请求未发出：局域网通道在按下的一瞬间断了，请重试".to_string());
+            }
         }
         st.ui_rev += 1;
         drop(st);
@@ -1641,26 +1668,34 @@ impl Worker {
                 true
             });
             for id in expired {
-                st.album.put_thumb(
-                    id,
-                    crate::state::ThumbSlot::Failed("手机没有回这张缩略图（超时）".to_string()),
-                );
+                // 迟到的超时通知不许把已经到手的图涂成失败（淘汰会让格子与在途记录错配）
+                if !matches!(st.album.slot(id), Some(crate::state::ThumbSlot::Ready(_))) {
+                    st.album.put_thumb(
+                        id,
+                        crate::state::ThumbSlot::Failed("手机没有回这张缩略图（超时）".to_string()),
+                    );
+                }
             }
             st.album.inflight = self.album_inflight.len();
         }
         let inflight_before = self.album_inflight.len();
+        // 不变量：`Pending` 必须有一条在途记录。上面两条路（换代际、迟到应答被丢）都会让
+        // 记录消失而格子还留着，这里一次扫干净，下一轮排队就会把它们重新要回来。
+        let inflight_ids: Vec<u64> = self.album_inflight.iter().map(|(_, id, _)| *id).collect();
+        let orphaned = st.album.drop_orphan_pending(&inflight_ids);
         let mut sent_any = false;
         if !changed {
             let gen = st.album.generation;
-            // 排队：只给"画得出来的格子"下载（看不见的照片不该占带宽与内存），FIFO
-            let queued: Vec<u64> = st
-                .album
-                .visible_ids()
-                .iter()
-                .map(|i| i.id)
-                .filter(|id| st.album.needs_thumb(*id) && !st.album.req_thumbs.contains(id))
-                .collect();
-            for id in queued {
+            // 单张请求（调试面 `/action/album-thumb`）优先出队，再补"画得出来的格子"，都是 FIFO。
+            // 这条队列以前**只做排除、从不消费**：那一格既不被单独请求又被视口排队跳过，永远停在"等排队"。
+            // 清单还在路上时一张都不排：`items` 这时还是上一页那叠，孤儿格子会按新代际占满并发位、把新页挤成"等排队"
+            let mut wanted: Vec<u64> = Vec::new();
+            if !st.album.loading {
+                wanted.extend(st.album.req_thumbs.iter().copied());
+                wanted.extend(st.album.visible_ids().iter().map(|i| i.id));
+            }
+            let mut sent_ids: Vec<u64> = Vec::new();
+            for id in wanted {
                 if self.album_inflight.len() >= crate::state::ALBUM_THUMB_INFLIGHT {
                     break;
                 }
@@ -1677,21 +1712,52 @@ impl Worker {
                 if ok {
                     self.album_inflight.push((gen, id, Instant::now()));
                     st.album.mark_thumb_pending(id);
+                    sent_ids.push(id);
                     sent_any = true;
                 } else {
                     st.album.put_thumb(
                         id,
                         crate::state::ThumbSlot::Failed("通道未就绪，缩略图没有发出".to_string()),
                     );
+                    sent_ids.push(id);
                     sent_any = true;
                 }
             }
+            st.album.req_thumbs.retain(|i| !sent_ids.contains(i));
             st.album.inflight = self.album_inflight.len();
         }
-        if sent_any || st.album.inflight != inflight_before || changed {
+        // 三条"每一次等待都要有必然到达的结局"的兜底：手机侧相册任务排队满时只写它自己的日志、
+        // 一帧都不回（`requestList` / `requestFull`），电脑不能只靠应答收尾。阈值见那两个常量。
+        let now = Instant::now();
+        if st.album.list_stalled(now) {
+            st.album.set_loading(false);
+            st.push_error(
+                "手机没有回这一页清单（超时 20 秒）：手机可能锁屏，或相册任务在它那边排队满了。点「刷新」重试"
+                    .to_string(),
+            );
+        }
+        let stalled_full = st.album.take_stalled_full_report(now);
+        let drag_orphan = st.album.drop_orphan_drag_progress();
+        if stalled_full > 0 {
+            // 只说一次、也**不撤路由**：排队时尾号那张等几分钟是正常的，撤了晚到的好图会被当意外拒收
+            st.push_error(format!(
+                "有 {stalled_full} 张原图手机到现在还没开始传（多半是在它那边排队满了，或前面有大文件）。先别重复点导出，等这批传完再看一眼目录"
+            ));
+        }
+        if sent_any
+            || orphaned
+            || drag_orphan
+            || stalled_full > 0
+            || st.album.inflight != inflight_before
+            || changed
+        {
             st.ui_rev += 1;
         }
-        let need_post = sent_any || st.album.inflight != inflight_before;
+        let need_post = sent_any
+            || orphaned
+            || drag_orphan
+            || stalled_full > 0
+            || st.album.inflight != inflight_before;
         drop(st);
         if need_post {
             post_state_changed(self.hwnd_raw);
@@ -1719,7 +1785,7 @@ impl Worker {
             );
             return;
         }
-        st.album.loading = false;
+        st.album.set_loading(false);
         st.album.items = items
             .into_iter()
             .map(|i| crate::state::AlbumItemView {
@@ -1797,7 +1863,7 @@ impl Worker {
         };
         // 有结局就摘掉进度：留着那一格会一直转，而"转完=可以拖"是这环唯一的含义
         st.album.clear_drag_progress(album_id);
-        match route {
+        match route.purpose {
             crate::state::AlbumPurpose::Drag => {
                 // 成功的那一份先留着：等不到它的拖出（大视频）要靠它做到"再拖一次立刻出去"
                 if ok {
@@ -1814,6 +1880,8 @@ impl Worker {
             }
             crate::state::AlbumPurpose::Export => {
                 if ok {
+                    // 记进"这次会话已导出成功"：一次选超过 256 张时，第二次点导出的要接着往下发
+                    st.album.exported.insert(album_id);
                     st.push_toast("相册原图已导出".to_string(), detail.clone());
                 } else {
                     st.push_error(format!("相册原图导出失败: {detail}"));
@@ -2738,8 +2806,11 @@ impl Worker {
             self.state.lock().unwrap().inbox_dir.clone()
         } else {
             let decision = {
-                let st = self.state.lock().unwrap();
-                match st.album.routes.get(&album_id).copied() {
+                let mut st = self.state.lock().unwrap();
+                // 手机答了话就记下"已开始"：停滞判据管的是"连 META 都没来过"那一段，
+                // 本机随后拒收（落不了盘）也说明手机回了，不该被"手机没回"误报。
+                st.album.mark_route_started(album_id);
+                match st.album.routes.get(&album_id).map(|r| r.purpose) {
                     Some(crate::state::AlbumPurpose::Export) => {
                         let d = st.album.export_dir.trim().to_string();
                         if d.is_empty() {

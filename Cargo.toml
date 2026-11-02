@@ -21,7 +21,7 @@ exclude = ["Tests/fuzz"]
 default-members = ["Crates/app"]
 
 [workspace.package]
-version = "0.5.2"
+version = "0.5.3"
 edition = "2021"
 license = "GPL-3.0-or-later"
 rust-version = "1.97.1"
@@ -64,6 +64,13 @@ serde = { version = "1.0.203", features = ["derive"] }
 serde_json = "1.0.120"
 
 # L1：panic=abort（全 profile，防 panic 穿越 FFI 边界）
+#
+# ⚠ 一个隐含契约：两个平台壳里那 152 处 `lock().unwrap()`（Windows 侧最多）**只有在
+# panic=abort 下才安全** —— abort 直接终止进程，锁永远不会被"中毒"，unwrap 也就永远不会
+# 在别的线程 panic 之后连锁 panic。谁要把这里改成 `panic=unwind`（例如为了测试里
+# `catch_unwind` 断言 panic），必须先把这些 `lock().unwrap()` 全换成
+# `lock().unwrap_or_else(|p| p.into_inner())`（本仓 `ble_central.rs` 已有这种写法可抄），
+# 否则表现是"某个线程 panic 之后，整机其他线程陆续 abort 在取锁上"，比原来的问题更难查。
 [profile.dev]
 panic = "abort"
 

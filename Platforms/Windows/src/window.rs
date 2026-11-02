@@ -851,14 +851,15 @@ fn on_left_click(x: i32, y: i32) {
                         let ids: Vec<u64> = st.album.selected.clone();
                         if ids.is_empty() {
                             st.push_error("选中状态在这一步被清掉了，没有请求任何原图".to_string());
-                        } else {
-                            st.album.plan_fetch(
-                                &ids,
-                                dir.display().to_string(),
-                                crate::state::AlbumPurpose::Export,
-                            );
-                            st.ui_rev += 1;
+                        } else if let Some(why) = st.album.plan_fetch(
+                            &ids,
+                            dir.display().to_string(),
+                            crate::state::AlbumPurpose::Export,
+                        ) {
+                            // 超上限的那部分本机没发（手机侧对超出的张数是静默丢弃的），不说就等于"导出悄悄少几张"
+                            st.push_error(why);
                         }
+                        st.ui_rev += 1;
                     }
                     Err(e) => push_error(format!("导出目录用不了（{}）: {e}", dir.display())),
                 }
@@ -952,17 +953,21 @@ fn album_drag_out(cell: usize) {
     if !missing.is_empty() {
         let n = missing.len();
         let mut st = arc.lock().unwrap();
-        st.album.plan_fetch(
+        let capped = st.album.plan_fetch(
             &missing,
             dir.display().to_string(),
             crate::state::AlbumPurpose::Drag,
         );
+        let again = st.album.drag_req.len();
         st.ui_rev += 1;
         drop(st);
-        push_error(format!(
-            "这次没有拖出去：{n} 张原图还在手机上没取回来（已发起补齐）。\
-             等这几格的圆环跑完再拖，就是一次全部出去"
-        ));
+        push_error(match capped {
+            Some(why) => format!("这次没有拖出去：{n} 张原图没取回来。{why}"),
+            None => format!(
+                "这次没有拖出去：{n} 张原图还在手机上没取回来（已重新发起 {again} 张）。\
+                 等这几格的圆环跑完再拖，就是一次全部出去"
+            ),
+        });
         return;
     }
     let hwnd = HWND({
