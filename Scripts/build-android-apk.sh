@@ -41,7 +41,7 @@ fi
 if [ -z "${BUILD_TOOLS:-}" ]; then
   BT="${ANDROID_HOME:+$ANDROID_HOME/build-tools}"
   [ -d "$BT" ] || BT="$ROOT/LOCAL_TOOLCHAIN/Android-SDK/build-tools"
-  BUILD_TOOLS="$(ls -d "$BT"/* 2>/dev/null | sort -V | tail -1)"
+  BUILD_TOOLS="$(ls -d "$BT"/* 2>/dev/null | sort -V | tail -1 || true)"
 fi
 BT="${BUILD_TOOLS:-/nonexistent}"
 APKSIGNER="$(find_exe "$BT/apksigner")" || { echo "❌ 缺 apksigner（$BT）"; exit 1; }

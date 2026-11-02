@@ -167,6 +167,15 @@ jobs:
           if (-not (Test-Path $wix)) { throw "dotnet 装完找不到 $wix" }
           & $wix extension add -g "WixToolset.Util.wixext/${{ env.WIX_VERSION }}"
           "$env:USERPROFILE\.dotnet\tools" >> $env:GITHUB_PATH
+          # 把扩展 DLL 的**绝对路径**交给出包脚本。0.5.3 第一次云端跑就是栽在这里：
+          # 脚本传的是包名，`wix build` 退 2 且一个字错误都不吐（本地复现出的原文是
+          # WIX0144 "extension could not be found"）——裸包名要靠 WiX 自己去缓存里解析，
+          # 跨 pwsh/bash 两个步骤就不可靠，直接给路径没有歧义。
+          $extDll = Get-ChildItem (Join-Path $env:USERPROFILE ".wix\extensions\WixToolset.Util.wixext\*\wixext5\WixToolset.Util.wixext.dll") -ErrorAction SilentlyContinue |
+                    Select-Object -First 1
+          if (-not $extDll) { throw "wix extension add -g 跑完了却找不到扩展 DLL（~\.wix\extensions\...）；别把包名当路径交给脚本" }
+          "WIX_UTIL_EXT=$($extDll.FullName)" >> $env:GITHUB_ENV
+          "util 扩展：$($extDll.FullName)"
       - uses: actions/download-artifact@v4
         with:
           name: linkx-exe

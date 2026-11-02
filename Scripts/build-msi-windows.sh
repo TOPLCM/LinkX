@@ -85,12 +85,25 @@ echo "== 4) 打包 MSI（$ARCH） =="
 OUT="Target/msi/LinkX-$VERSION-$ARCH.msi"
 command -v wix >/dev/null || die "未找到 wix（dotnet tool install -g wix）"
 echo "  引擎 = WiX Toolset（构建已注入版本的 $WXS_GEN，-arch $ARCH）"
-# -ext 带 util 扩展（CloseApplication 只有它有）。优先指到本机磁盘上那份（LOCAL_WIX/ 是安装副本，
-# 不入库）：只写包名时 WiX 会去 NuGet 现取现装进 ~/.wix/extensions，出包这一步就悄悄依赖网络。
-# ARM64 包这里不需要额外准备：扩展会按包的目标架构挑对应的原生 CA，实测 arm64 包里
-# 落的是 Wix4UtilCA_A64 与 Wix4CloseApplications_A64，那道"卸载前先结束本体"的保护没掉。
-UTIL_EXT="$(ls LOCAL_WIX/extensions/WixToolset.Util.wixext/*/wixext5/WixToolset.Util.wixext.dll 2>/dev/null | head -1)"
-[ -n "$UTIL_EXT" ] || UTIL_EXT=WixToolset.Util.wixext
+# -ext 带 util 扩展（CloseApplication 只有它有），**只认扩展 DLL 的实际路径**。
+# 0.5.3 第一次云端跑在这里退 2、一个字错误都不吐：根因不是包名解析不了，而是
+# `UTIL_EXT="$(ls … | head -1)"` 这种写法——`set -euo pipefail` 下 `ls` 一没命中就整脚本静默退出，
+# 而 CI 没有 `LOCAL_WIX` 那份本机副本。查找一律走下面的函数，每条候选都吃掉失败，绝不外泄成退出码。
+# ARM64 包不需要额外准备：扩展按目标架构挑原生 CA，实测包里落的是 Wix4UtilCA_A64 与
+# Wix4CloseApplications_A64，"卸载前先结束本体"那道保护没掉。
+find_util_ext() {
+  local d hit=""
+  for d in LOCAL_WIX/extensions "${HOME:-$USERPROFILE}/.wix/extensions" \
+           "${USERPROFILE:-$HOME}/.wix/extensions" "${LOCALAPPDATA:-$HOME/AppData/Local}/wix/extensions"; do
+    [ -d "$d" ] || continue
+    hit="$(ls "$d"/WixToolset.Util.wixext/*/wixext5/WixToolset.Util.wixext.dll 2>/dev/null | head -1 || true)"
+    [ -n "$hit" ] && { printf '%s' "$hit"; return; }
+  done
+}
+UTIL_EXT="${WIX_UTIL_EXT:-}"
+[ -n "$UTIL_EXT" ] || UTIL_EXT="$(find_util_ext)"
+[ -n "$UTIL_EXT" ] || die "找不到 WixToolset.Util.wixext 的扩展 DLL（仓库副本 LOCAL_WIX/extensions 与全局缓存 ~/.wix/extensions 都没有）。装一把：wix extension add -g WixToolset.Util.wixext/${WIX_VERSION:-5.0.2}"
+echo "  util 扩展 = $UTIL_EXT"
 wix build "$WXS_GEN" -arch "$ARCH" -ext "$UTIL_EXT" -o "$OUT"
 echo "  ✅ $OUT"
 
