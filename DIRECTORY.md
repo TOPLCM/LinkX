@@ -157,10 +157,8 @@ Python 脚本只用标准库。构建出包：`build-mingw-windows.sh` 与 `buil
 `check-msi-uninstall.ps1` 核对卸载前的退出保护与收尾动作表级接线。
 
 图标链是 `svg_assets.py` 加两个模板 `launcher_icon.tmpl`、`vector_icon.tmpl`。
-真机验收与测量：`check-file-transfer.py`（电脑端→手机端）、`check-phone-to-pc.py`（手机端→电脑端）、
-`soak-transfer.py`（多轮双向传输）、`verify-resume.py`（断点续传）、
-`bench-throughput.py`（吞吐与工作集峰值）、`mem-map.py`（工作集构成）、`ui-shot.py`（界面截图）、
-`linkx-ctl.py`（调试控制面命令行）。
+真机验收与测量的脚本跑在维护者本机（依赖手边两台真设备的路径），**不在本仓库**；
+它们各验什么、判据是什么，列在 [`Docs/Build.md`](Docs/Build.md) 的「真机验收做过什么」。
 
 ## 不在仓库里的东西
 

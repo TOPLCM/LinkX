@@ -20,7 +20,9 @@ import sys
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-# 与 Scripts/export-public.sh 的排除口径一致：内部材料不进公开仓，也就不必有对外说明
+# 与 Scripts/export-public.sh 的排除口径一致：内部材料不进公开仓，也就不必有对外说明。
+# 例外：那 8 个真机验收脚本虽然不随公开仓发布，但它们在内部仓是正常源码，
+# 照样得有"这是什么"的文件头，所以不进这里。
 INTERNAL_DIRS = ('Web', 'Skills', '.local-ide', '内部文档', '内部归档')
 INTERNAL_FILES = ('.local-ide-ignore', 'Scripts/export-public.sh', 'Scripts/git-snapshot.sh')
 INTERNAL_PATHS = ('Docs/README.md',)
