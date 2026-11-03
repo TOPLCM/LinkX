@@ -135,3 +135,40 @@ Get-FileHash -Algorithm SHA256 "$env:USERPROFILE\Downloads\LinkX-0.5.2-x64.msi"
 
 输出的哈希与上面那张表一致，才算拿到同一个文件。历史版本同理：核对值在
 `Archive/v<版本>/*.sha256`，本体可以就从同一目录取，也可以从 Releases 页面下载（一个版本一条）。
+
+## 历版校验值
+
+下面这些包**不在仓库里**：历版安装包本体已从库中退出（同一批包在 Releases 页面都有，进 git 只会让
+每次 clone 多拉几十 MB 并永久留在历史对象库里）。这张表留着的原因是它是复核的唯一依据——
+拿到任何一个当年的旧包，照这里比大小与 SHA-256 即可判断是不是同一份字节。
+
+| 版本 | 平台 | 文件 | 大小 (bytes) | SHA-256 |
+|---|---|---|---|---|
+| v0.1.0 | Windows | `LinkX-0.1.0-x64.msi` | 457,216 | `bef55560ac250f89c9c9dc491378cdda015384fee34a28b4c9a098c425d2f41f` |
+| v0.1.0 | Android | `LinkX-0.1.0-m1-release.apk` | 1,837,246 | `bb067c863fd5f488773b5e2db00ef10dc9ee27db538b252bfc62e807774d061a` |
+| v0.2.0 | Windows | `LinkX-0.2.0-x64.msi` | 539,648 | `ce957cd08ba39adbf82917187ea593c505f0077b826af6beaa3e254ef608b262` |
+| v0.2.0 | Android | `LinkX-0.2.0-release.apk` | 2,029,814 | `c060183ab00d55469312967fc56acd8a3db2e5d755baf7638d23386cc6459e49` |
+| v0.3.0 | Windows | `LinkX-0.3.0-x64.msi` | 598,016 | `b7ecd5b9efd645f9824b5bfd2a9e5a011ae5a7048cf7e7b3bbc7a0f2fa75e05e` |
+| v0.3.0 | Android | `LinkX-0.3.0-release.apk` | 2,300,150 | `a3194be837141be3aa5088dc39c2b163d9f7fa3fcdc1850ed0c4f5447a3406bc` |
+| v0.4.0 | Windows | `LinkX-0.4.0-x64.msi` | 585,728 | `ddbaed0935b90ec26cf934cf5f64d4475e66a49db293442f1b200ef0d8b47a5b` |
+| v0.4.0 | Android | `LinkX-0.4.0-release.apk` | 2,378,926 | `b328e63f0daf2c2e00f7877e80cc5dc4caea52875b950d0057ddc635ad1fb932` |
+| v0.4.1 | Windows | `LinkX-0.4.1-x64.msi` | 593,920 | `b05e0c39e20e0b62bef13fd7084a4063cdb3419bc451614c4e6ec0130a739fb8` |
+| v0.4.1 | Android | `LinkX-0.4.1-release.apk` | 2,391,214 | `7adb83afe49e5cf271c95d3b111e23c5b2e22dd7e52b5388d3c9250208c9c842` |
+| v0.4.2 | Windows | `LinkX-0.4.2-x64.msi` | 618,496 | `c970b9e0310d845d2923698ae48e9ca478af02289daa00da3143ed48116336b4` |
+| v0.4.2 | Android | `LinkX-0.4.2-release.apk` | 2,424,038 | `530f8ab114805da54666152a5dc45f405989989b19fc932ed4b2d4d9dc4ade2b` |
+| v0.4.3 | Windows | `LinkX-0.4.3-x64.msi` | 618,496 | `af1167b5eec968d74dd8ab8c1c2a7bdd5a447412b5f55e4cfce73b7083b94c1f` |
+| v0.4.3 | Android | `LinkX-0.4.3-release.apk` | 2,424,038 | `022cf3ddad78c2841e9824794d20c91b07ec2b68df25a5a869c3193fc092c04a` |
+| v0.4.4 | Windows | `LinkX-0.4.4-x64.msi` | 626,688 | `96db5f96979e9a5a7c6e559dcb57f0c80f90f9da6f5ee134d5216e87f7dc4194` |
+| v0.4.4 | Android | `LinkX-0.4.4-release.apk` | 2,424,038 | `d99561dfbdf726e9808346cf9a393b6bf77d3117d3bd3e6c33858bd626ed5ab2` |
+| v0.4.5 | Windows | `LinkX-0.4.5-x64.msi` | 630,784 | `567ac6775dcdf4caef1e1e9222fda2dd7a6b5ebad9118bc359d5ac12307226af` |
+| v0.4.5 | Android | `LinkX-0.4.5-release.apk` | 2,428,134 | `26462226f016ab9ff73acf9c1e81b20417e58338a4bc4e0aa747c0d0da056275` |
+| v0.5.0 | Windows | `LinkX-0.5.0-x64.msi` | 626,688 | `cb9bebdc02f67719c4ce424f250d89e8749301de0b2252abb5237632979e8875` |
+| v0.5.0 | Android | `LinkX-0.5.0-release.apk` | 2,407,710 | `16383f369fa61adfd2e3e508034047d1bf94e50bc742860176c64227acf1e56b` |
+| v0.5.2 | Windows | `LinkX-0.5.2-x64.msi` | 1,048,576 | `249266f2c3fd43bb5d5eab9df01d101bf9447b1b957548282efde91bae966a12` |
+| v0.5.2 | Android | `LinkX-0.5.2-release.apk` | 2,420,287 | `529217a5575069859a101e6df904731cc357ca5291425e17e543c46b4cc71460` |
+| v0.5.3 | Windows | `LinkX-0.5.3-arm64.msi` | 1,003,520 | `6352881714c22fb72f44000b0056fa6ce2ae2378d6f6c3e473e8dc40e48de267` |
+| v0.5.3 | Windows | `LinkX-0.5.3-x64.msi` | 1,048,576 | `f260d23bd90cd5ef39059309fcfd6f2fbe606352beb76cb648382bac76fcf5c7` |
+| v0.5.3 | Android | `LinkX-0.5.3-release.apk` | 3,001,997 | `e1ef49868ce78b1bf02ca05077156ca6768f2935d68acfa34f2d9f1116fc078e` |
+
+`v0.5.1` 没有归档记录：那一版的包只在 Releases 页面有，当年没建 `Archive/v0.5.1/`，
+所以这里也没有它的逐版校验值。**这是缺口，不是"它不存在"**——要补的话从线上附件回取重算即可。

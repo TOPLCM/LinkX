@@ -33,8 +33,20 @@ REF = re.compile(r"BUG-\d|决策\s+[A-Z]{2}\b|续\s*\d{2,3}|Spec\s+\d|#\d{2,}\b"
 # `#[...]` 是 Rust 属性、不是注释，必须排除：否则属性被算成"注释"，
 # 有价值的说明只好被删掉去凑比例。**下面的排除集必须含 `[`**。
 COMMENT = re.compile(r"^\s*(//+|#(?![\[@!])|/\*|\*/)")
-SKIP_DIR = {".git", "Target", "Release", "Temp", "Tools", "node_modules", "Web",
-            ".local-ide", "local-output", "build", "gradle", ".cargo"}
+# 排除集 = 仓库里通用的构建/产物目录 + `.internal-excludes`（不入库）里的私有目录。
+# 私有目录名不写死在这里：这份脚本会随公开仓发布，写出名字就等于对外自述私有工作区结构。
+SKIP_DIR = {".git", "Target", "Release", "Temp", "node_modules",
+            "build", "gradle", ".cargo"}
+if os.path.isfile(".internal-excludes"):
+    _b = None
+    for _l in open(".internal-excludes", encoding="utf-8").read().splitlines():
+        _l = _l.strip()
+        if _l == "[dirs]":
+            _b = True; continue
+        if _l.startswith("["):
+            _b = None; continue
+        if _b and _l and not _l.startswith("#"):
+            SKIP_DIR.add(_l.split("/")[-1])
 
 fails, checked = [], 0
 for base in SCOPE:

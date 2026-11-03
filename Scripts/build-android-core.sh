@@ -5,11 +5,12 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+. "$ROOT/Scripts/lib-local.sh"
 
 # ANDROID_HOME / ANDROID_NDK_HOME 优先；未设置时再探测几个常见的 SDK 安装位置。
 ANDROID_HOME="${ANDROID_HOME:-}"
 if [ -z "$ANDROID_HOME" ]; then
-  for c in "$ROOT/LOCAL_TOOLCHAIN/Android-SDK" "$HOME/Android/Sdk" "/opt/android-sdk"; do
+  for c in ${LINKX_TOOLCHAIN_ROOT:+"$LINKX_TOOLCHAIN_ROOT/Toolchain/Android-SDK"} "$HOME/Android/Sdk" "/opt/android-sdk"; do
     [ -d "$c" ] && ANDROID_HOME="$c" && break
   done
 fi

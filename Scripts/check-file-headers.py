@@ -20,14 +20,35 @@ import sys
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-# 与 Scripts/export-public.sh 的排除口径一致：内部材料不进公开仓，也就不必有对外说明。
-# 例外：那 8 个真机验收脚本虽然不随公开仓发布，但它们在内部仓是正常源码，
-# 照样得有"这是什么"的文件头，所以不进这里。
-INTERNAL_DIRS = ('Web', 'Skills', '.local-ide', '内部文档', '内部归档')
-INTERNAL_FILES = ('.local-ide-ignore', 'Scripts/export-public.sh', 'Scripts/git-snapshot.sh')
-INTERNAL_PATHS = ('Docs/README.md',)
-SKIP_DIRS = {'.git', 'Target', 'Release', 'Temp', 'Tools', 'node_modules',
-              'build', 'gradle', '.cargo'}
+# 内部材料的名单从**不入库**的 `.internal-excludes` 读（与 Scripts/export-public.sh 同一份口径）：
+# 那些目录名是维护者私有工作区的结构，写进这份会随公开仓发布的源码里，等于对外自述一遍。
+# 文件不存在时列表为空——公开仓里没有内部材料，本来就不需要排除任何东西。
+def _read_local_excludes():
+    path = '.internal-excludes'
+    if not os.path.isfile(path):
+        return (), (), ()
+    dirs, files, paths = [], [], []
+    bucket = None
+    for line in io.open(path, encoding='utf-8').read().splitlines():
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        if line == '[dirs]':
+            bucket = dirs; continue
+        if line == '[files]':
+            bucket = files; continue
+        if line == '[paths]':
+            bucket = paths; continue
+        if bucket is not None:
+            bucket.append(line)
+    return tuple(dirs), tuple(files), tuple(paths)
+
+
+INTERNAL_DIRS, INTERNAL_FILES, INTERNAL_PATHS = _read_local_excludes()
+# 仓库自带的维护者脚本：它们本身就不发布（由 export 排除），这里也要认得，免得对它们提对外说明要求。
+INTERNAL_FILES += ('Scripts/export-public.sh', 'Scripts/git-snapshot.sh')
+SKIP_DIRS = {'.git', 'Target', 'Release', 'Temp', 'node_modules',
+             'build', 'gradle', '.cargo'}
 MARKS = {'.rs': ('//!', '//'), '.kt': ('/**', '//'), '.sh': ('#',), '.py': ('#', '"""'),
          '.ps1': ('#',), '.proto': ('//',), '.wxs': ('<!--',)}
 

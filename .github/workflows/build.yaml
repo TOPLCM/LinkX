@@ -30,7 +30,8 @@ jobs:
         run: cargo clippy --workspace --exclude linkx-windows --exclude linkx-storage --exclude linkx-app --all-targets -- -D warnings
       - name: 单元测试（共享核心）
         run: cargo test --workspace --exclude linkx-windows
-      # 源码里不许出现内部编号（公开仓库的读者没有那份台账），注释占比与连续注释块也有上限。
+      # 源码里不许出现内部编号（外部读者手上没有那套编号体系，写了就是悬空引用），
+      # 注释占比与连续注释块也有上限。
       - name: 注释卫生
         run: bash Scripts/check-comment-hygiene.sh
       - name: 版本同步（防"漏改某一处"）

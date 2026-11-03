@@ -18,14 +18,22 @@ import sys
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 text = io.open('Release/README.md', encoding='utf-8').read()
+# 只解析「当前版本」那一节的表：历版校验值表（`## 历版校验值`）用的是同样的列格式，
+# 一起抓会把 25 条历史登记当成"盘上没有的产物"全部误报，而真正该比对的那几条反而被淹没。
+cur_section = text.split('## 历版校验值')[0]
 rows = re.findall(
     r'\|\s*(Windows|Android)\s*\|\s*`(LinkX-[^`]+)`[^|]*\|\s*([\d,]+)\s*\|\s*`([0-9a-f]{64})`',
-    text,
+    cur_section,
 )
 # 行数不写死（某一版可以少一个产物，比如不发调试包），但一行都没有就是表格格式变了、
 # 这道检查已经什么都不测了。登记与盘上必须互相对得上，见下面的双向比对。
 if not rows:
     sys.exit('一行都没解析到——表格格式变了，这个检查本身失效了')
+# 上面按「## 历版校验值」切过一刀，所以要再确认当前版的三条真在里面：
+# 否则一旦有人把它们挪到那一节之后，这里就会解析到历版行或零行，而门禁照样打印"一致"。
+cur_ver = os.environ.get('LINKX_CUR_VER') or ''
+if cur_ver and not any(cur_ver in name for _p, name, _s, _d in rows):
+    sys.exit('当前版本 %s 的产物没出现在待核对行里——表格分节把当前版表划到历版之后了' % cur_ver)
 
 # 目录从表格里的平台列推，不写死文件名：写死版本号的话，下一次换版本就是 KeyError，
 # 而"台账脚本崩了"很容易被读成"产物有问题"。

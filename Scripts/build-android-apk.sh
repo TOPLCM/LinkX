@@ -6,6 +6,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+. "$ROOT/Scripts/lib-local.sh"
 
 MODE="debug"
 [ "${1:-}" = "--release" ] && MODE="release"
@@ -29,19 +30,23 @@ JAVA_CMD="$(find_exe "$JAVA_HOME_21/bin/java")" \
   || { echo "❌ 缺 JDK 21（$JAVA_HOME_21/bin/java[.exe]）；可设 JAVA_HOME_21 指定路径"; exit 1; }
 KEYTOOL="$(find_exe "$JAVA_HOME_21/bin/keytool")" \
   || { echo "❌ 缺 keytool（$JAVA_HOME_21/bin）"; exit 1; }
-# Gradle 解析顺序：GRADLE_BIN 环境变量 → PATH 上的 gradle → 仓库 wrapper → 仓库内的本机发行版布局
+# Gradle 解析顺序：GRADLE_BIN 环境变量 → PATH 上的 gradle → 仓库 wrapper → 本机工具链副本（只在 .linkx-local 里配）
 if [ -z "${GRADLE_BIN:-}" ]; then
   if command -v gradle >/dev/null 2>&1; then GRADLE_BIN="$(command -v gradle)"
   elif [ -x "$ROOT/Platforms/Android/gradlew" ]; then GRADLE_BIN="$ROOT/Platforms/Android/gradlew"
-  else GRADLE_BIN="$(ls -d "$ROOT"/LOCAL_TOOLCHAIN/Gradle/wrapper/dists/gradle-8.7-bin/*/gradle-8.7/bin/gradle 2>/dev/null | head -1)"
+  elif [ -n "$LINKX_TOOLCHAIN_ROOT" ]; then
+    GRADLE_BIN="$(ls -d "$LINKX_TOOLCHAIN_ROOT"/Toolchain/Gradle/wrapper/dists/gradle-8.7-bin/*/gradle-8.7/bin/gradle 2>/dev/null | head -1 || true)"
   fi
 fi
 [ -n "$GRADLE_BIN" ] || { echo "❌ 找不到 Gradle：装一个并放进 PATH，或设 GRADLE_BIN 指向可执行文件"; exit 1; }
-# build-tools 解析顺序：BUILD_TOOLS 环境变量 → SDK 里的最高版本 → 仓库内的本机布局
+# build-tools 解析顺序：BUILD_TOOLS 环境变量 → SDK 里的最高版本 → 本机工具链副本（只在 .linkx-local 里配）
 if [ -z "${BUILD_TOOLS:-}" ]; then
   BT="${ANDROID_HOME:+$ANDROID_HOME/build-tools}"
-  [ -d "$BT" ] || BT="$ROOT/LOCAL_TOOLCHAIN/Android-SDK/build-tools"
-  BUILD_TOOLS="$(ls -d "$BT"/* 2>/dev/null | sort -V | tail -1 || true)"
+  if [ ! -d "${BT:-}" ] && [ -n "$LINKX_TOOLCHAIN_ROOT" ]; then
+    BT="$LINKX_TOOLCHAIN_ROOT/Toolchain/Android-SDK/build-tools"
+  fi
+  # BT 两处都没命中时必须是"不存在的确定路径"，不能留空——空值会让下面的通配展开成 /*。
+  BUILD_TOOLS="$(ls -d "${BT:-/nonexistent/build-tools}"/* 2>/dev/null | sort -V | tail -1 || true)"
 fi
 BT="${BUILD_TOOLS:-/nonexistent}"
 APKSIGNER="$(find_exe "$BT/apksigner")" || { echo "❌ 缺 apksigner（$BT）"; exit 1; }
@@ -124,7 +129,7 @@ VERSION="${VERSION:-0.0.0}"
 mkdir -p Release/Android
 # debug 与 release 用同一把测试密钥签名（构建机上按需生成，不入库）：否则 `adb install -r`
 # 直接报 INSTALL_FAILED_UPDATE_INCOMPATIBLE，只能卸载重来，App 私有数据连同配对关系一起丢。
-KS="${LINKX_TEST_KEYSTORE:-$ROOT/LOCAL_KEYS/linkx-test.jks}"
+KS="${LINKX_TEST_KEYSTORE:-${LINKX_KEYSTORE:-$LINKX_TEST_KEYSTORE_DEFAULT}}"
 if [ ! -f "$KS" ]; then
   mkdir -p "$(dirname "$KS")"
   "$KEYTOOL" -genkeypair -v -keystore "$KS" -alias linkx-test \

@@ -242,9 +242,9 @@ jobs:
         env:
           KS_B64: ${{ secrets.LINKX_APK_KEYSTORE_B64 }}
         run: |
-          mkdir -p LOCAL_KEYS
+          mkdir -p .local-keys
           if [ -n "${KS_B64:-}" ]; then
-            printf '%s' "$KS_B64" | base64 -d > LOCAL_KEYS/linkx-test.jks
+            printf '%s' "$KS_B64" | base64 -d > .local-keys/linkx-test.jks
             echo "✅ 已注入交付签名密钥（与历史版本同一把）"
           else
             echo "⚠ 未设 secrets.LINKX_APK_KEYSTORE_B64：本次 APK 由脚本现生成测试密钥签名，"
