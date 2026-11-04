@@ -65,7 +65,7 @@ bash Scripts/build-android-apk.sh --release
 DEBUGD=1 bash Scripts/build-android-core.sh && DEBUGD=1 bash Scripts/build-android-apk.sh
 ```
 
-只给其中一个，会产出一个"名字叫 debug、其实没有控制面"的包（脚本会校验 `.so` 里的
+只给其中一个，会产出一个"名字叫 debug、实际不含控制面"的包（脚本会校验 `.so` 里的
 agent-debug 状态并强制重建，就是为了拦住这个）。
 
 **一个 APK 带两套 ABI**（`arm64-v8a` + `armeabi-v7a`）：`build-android-core.sh` 给两个 Rust 目标

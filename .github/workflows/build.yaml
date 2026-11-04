@@ -34,6 +34,9 @@ jobs:
       # 注释占比与连续注释块也有上限。
       - name: 注释卫生
         run: bash Scripts/check-comment-hygiene.sh
+      # 对外文档不许出现口语化禁词；私有工作区路径的检查在发布侧做（那里才有清单）。
+      - name: 文档语言与分层
+        run: bash Scripts/check-doc-style.sh
       - name: 版本同步（防"漏改某一处"）
         run: bash Scripts/check-version-sync.sh
       - name: 协议一致性
