@@ -1,0 +1,216 @@
+name: CI
+on: [push, pull_request]
+# 公开仓的 CI 只需要读代码：不给写权限，fork 的 PR 也就拿不到能改仓库的令牌。
+permissions:
+  contents: read
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+          targets: x86_64-pc-windows-gnu, aarch64-linux-android
+          # rustfmt / clippy 不是 rustc 自带的组件，要显式安装。
+          components: rustfmt, clippy
+      # 协议 crate 的 build.rs 会现场编译 Proto/*.proto，需要系统 protoc。
+      - name: protoc 21.12
+        run: |
+          curl -sSL -o /tmp/protoc.zip             https://github.com/protocolbuffers/protobuf/releases/download/v21.12/protoc-21.12-linux-x86_64.zip
+          unzip -q /tmp/protoc.zip -d /tmp/protoc
+          echo "PROTOC=/tmp/protoc/bin/protoc" >> $GITHUB_ENV
+          /tmp/protoc/bin/protoc --version
+      - name: 格式检查
+        run: cargo fmt --all -- --check
+      - name: 静态检查（clippy，告警即失败，含测试代码）
+        # 这三个 crate 在 Linux 上测不出可靠结论，改由 windows-host-tests 在真 Windows 上补 lint：
+        # linkx-windows 的 Win32 绑定只能在 Windows 目标编译；
+        # linkx-storage / linkx-app 依赖 bundled SQLite，交叉编译需要额外的 C 工具链。
+        run: cargo clippy --workspace --exclude linkx-windows --exclude linkx-storage --exclude linkx-app --all-targets -- -D warnings
+      - name: 单元测试（共享核心）
+        run: cargo test --workspace --exclude linkx-windows
+      # 源码里不许出现内部编号（外部读者手上没有那套编号体系，写了就是悬空引用），
+      # 注释占比与连续注释块也有上限。
+      - name: 注释卫生
+        run: bash Scripts/check-comment-hygiene.sh
+      # 对外文档不许出现口语化禁词。
+      - name: 文档语言与分层
+        run: bash Scripts/check-doc-style.sh
+      - name: 版本同步（防"漏改某一处"）
+        run: bash Scripts/check-version-sync.sh
+      - name: 协议一致性
+        run: bash Scripts/check-protocol-sync.sh
+      - name: 加密选型审计
+        run: bash Scripts/check-crypto-audit.sh
+      - name: Compose/Kotlin 版本配对
+        run: bash Scripts/check-compose-kotlin-pair.sh
+      - name: 协议风格检查（buf）
+        run: |
+          curl -sSLo /usr/local/bin/buf             https://github.com/bufbuild/buf/releases/download/v1.32.1/buf-Linux-x86_64
+          chmod +x /usr/local/bin/buf
+          buf --version
+          buf lint Proto
+  windows-shell:
+    runs-on: ubuntu-latest
+    needs: core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+          targets: x86_64-pc-windows-gnu
+      - run: sudo apt-get update && sudo apt-get install -y mingw-w64
+      - name: protoc 21.12（协议 crate 的 build.rs 需要）
+        run: |
+          curl -sSL -o /tmp/protoc.zip             https://github.com/protocolbuffers/protobuf/releases/download/v21.12/protoc-21.12-linux-x86_64.zip
+          unzip -q /tmp/protoc.zip -d /tmp/protoc
+          echo "PROTOC=/tmp/protoc/bin/protoc" >> $GITHUB_ENV
+      - name: 交叉编译 Windows 壳
+        run: cargo build --release --target x86_64-pc-windows-gnu --manifest-path Platforms/Windows/Cargo.toml
+      # 交付产物里不许有调试控制面。本 job 出的正是不带 agent-debug 的那个 exe。
+      - name: 交付构建零调试残留
+        run: bash Scripts/check-release-clean.sh Target/x86_64-pc-windows-gnu/release/linkx.exe
+  android:
+    runs-on: ubuntu-latest
+    needs: core
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust 工具链 + aarch64-linux-android + armv7-linux-androideabi
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+          # 0.5.3 兼容性：一个 APK 带两套 ABI，32 位老机与 64 位新机共用同一个产物。
+          targets: aarch64-linux-android, armv7-linux-androideabi
+      - name: cargo-ndk（把 Rust 核心打成安卓 .so）
+        run: cargo install cargo-ndk --version 4.1.2 --locked
+      - name: Android NDK r27c
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          add-to-path: false
+      - name: protoc 21.12（协议 crate 的 build.rs 需要）
+        run: |
+          curl -sSL -o /tmp/protoc.zip             https://github.com/protocolbuffers/protobuf/releases/download/v21.12/protoc-21.12-linux-x86_64.zip
+          unzip -q /tmp/protoc.zip -d /tmp/protoc
+          echo "PROTOC=/tmp/protoc/bin/protoc" >> $GITHUB_ENV
+      - name: JDK 21 + Gradle 8.7
+        uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 21 }
+      - uses: gradle/actions/setup-gradle@v3
+        with: { gradle-version: 8.7 }
+      # 出包走本地同一条脚本：Rust Core .so → Gradle → zipalign → apksigner → 零调试残留校验。
+      # 交付版校验只对 release 有意义：debug 包按定义带着调试控制面。
+      - name: 出交付 APK
+        env:
+          GRADLE_ONLINE: "1"
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > Platforms/Android/local.properties
+          bash Scripts/build-android-apk.sh --release
+      - name: 校验 APK 内含两套 ABI 的 liblinkx_core.so
+        # 清单先落变量再判：Actions 的 bash 默认 pipefail，`unzip -l | grep -q` 命中即关管道，
+        # unzip 收到 SIGPIPE(141) 会把一条正确的判据读成失败。
+        run: |
+          APK="$(ls Release/Android/*-release.apk | head -1)"
+          LIST="$(unzip -l "$APK")"
+          for abi in arm64-v8a armeabi-v7a; do
+            printf '%s\n' "$LIST" | grep -qE "lib/$abi/liblinkx_core\.so" \
+              || { echo "缺少 lib/$abi/liblinkx_core.so"; exit 1; }
+            echo "✅ APK 内含 lib/$abi/liblinkx_core.so"
+          done
+          echo "产物：$APK"
+      # 安卓交付物是唯一带 JNI 调试符号面的产物，这道检查必须在 CI 上跑。
+      - name: 交付构建零调试残留（APK 内 .so）
+        run: bash Scripts/check-release-clean.sh --apk-so "$(ls Release/Android/*-release.apk | head -1)"
+      - name: compose/kotlin 版本配对
+        run: bash Scripts/check-compose-kotlin-pair.sh
+      - name: 版本同步
+        run: bash Scripts/check-version-sync.sh
+  # ── 平台差异门禁───────────────────────────────────────────
+  # 有些缺陷只在 Windows 成立（Winsock 对「缓冲小于数据报」返回 WSAEMSGSIZE 并消费该包、
+  # FILETIME 只有 100ns 粒度），交叉编译拦不住，必须由真实 Windows runner 跑单测。
+  windows-host-tests:
+    runs-on: windows-latest
+    needs: core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+          # 这台 runner 只跑宿主（msvc）的构建，不需要交叉目标；clippy 不是 rustc 自带的组件。
+          components: clippy
+      - name: protoc 21.12（prost-build 不内置 protoc，缺则 build.rs panic；版本与本机一致）
+        run: |
+          Invoke-WebRequest -OutFile protoc.zip `
+            https://github.com/protocolbuffers/protobuf/releases/download/v21.12/protoc-21.12-win64.zip
+          Expand-Archive protoc.zip -DestinationPath "$PWD\protoc"
+          "PROTOC=$PWD\protoc\bin\protoc.exe" >> $env:GITHUB_ENV
+          & "$PWD\protoc\bin\protoc.exe" --version
+      # 不排除 linkx-windows：msvc 宿主上壳的单测可跑，正是要拦的那类平台语义所在地。
+      - name: 全量单测（含 Windows 壳）
+        run: cargo test --workspace
+      # 共享核心的 clippy 在 Linux 上做，壳与自检程序在这台真 Windows 上补。
+      #
+      # `missing_const_for_thread_local` 是 clippy 1.97 的误报：它建议把 thread_local 的
+      # 初值包进 `const { … }`，而本仓库那几处**已经是** `const { Cell::new(false) }`，
+      # lint 仍照报。改代码去迎合它反而会把"每次调用都重新初始化"的写法引进来，
+      # 所以这里按 lint 名单单独放行，别的一律照旧 `-D warnings`。
+      - name: 静态检查 Windows 壳与自检程序（clippy）
+        run: cargo clippy -p linkx-windows -p linkx-storage -p linkx-app --all-targets -- -D warnings -A clippy::missing_const_for_thread_local
+  # ── JNI 门禁──────────────────────────────────────────────
+  # linkx-ffi 的 jni feature 不在默认构建里；单独编译并测一次，免得只在发版前人肉发现。
+  jni-gate:
+    runs-on: ubuntu-latest
+    needs: core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+          components: clippy
+      - name: protoc 21.12（显式安装，不依赖 runner 镜像自带）
+        run: |
+          curl -sSL -o /tmp/protoc.zip \
+            https://github.com/protocolbuffers/protobuf/releases/download/v21.12/protoc-21.12-linux-x86_64.zip
+          unzip -q /tmp/protoc.zip -d /tmp/protoc
+          echo "PROTOC=/tmp/protoc/bin/protoc" >> $GITHUB_ENV
+          /tmp/protoc/bin/protoc --version
+      - name: clippy --features jni --tests
+        run: cargo clippy -p linkx-ffi --features jni --tests -- -D warnings
+      - name: test --features jni
+        run: cargo test -p linkx-ffi --features jni
+  # ── 供应链门禁：依赖安全通告 ──────────────────────────────────────
+  # 这条 job 把 Cargo.lock 交给 RustSec 通告库比对，不上传源码。
+  # 要放行某条必须把编号写进下面的参数，并在 Docs/Security.md 留下理由，不许静默忽略。
+  supply-chain:
+    runs-on: ubuntu-latest
+    needs: core
+    steps:
+      - uses: actions/checkout@v4
+      - name: cargo-audit
+        run: cargo install cargo-audit
+      - name: 主 workspace 依赖漏洞
+        run: cargo audit --file Cargo.lock --ignore RUSTSEC-2023-0071
+  # ── 汇总闸门：给分支保护用的一条稳定检查名 ──────────────────────────
+  # run 的状态本来就是所有 job 的合取（任何一条红，整体就红），所以这里不是"再判一次成败"，
+  # 而是给外面一个**不用随 workflow 改动而改**的必过检查：把 Settings → Branches →
+  # required checks 填 `全部门禁通过` 这一个名字就行，逐条列六个 job 名迟早漏一条。
+  # skipped / cancelled 在这里一律算不过：runner 抽风、被人手工取消、needs 没满足而被跳过，
+  # 都不能被读成"这一版没问题"。
+  all-green:
+    name: 全部门禁通过
+    runs-on: ubuntu-latest
+    needs: [core, windows-shell, android, windows-host-tests, jni-gate, supply-chain]
+    if: always()
+    steps:
+      - name: 六条 job 必须全是 success
+        env:
+          RESULTS: "core=${{ needs.core.result }} windows-shell=${{ needs.windows-shell.result }} android=${{ needs.android.result }} windows-host-tests=${{ needs.windows-host-tests.result }} jni-gate=${{ needs.jni-gate.result }} supply-chain=${{ needs.supply-chain.result }}"
+        run: |
+          echo "$RESULTS"
+          bad=0
+          for kv in $RESULTS; do
+            [ "${kv#*=}" = "success" ] || { echo "  ✗ $kv"; bad=1; }
+          done
+          [ "$bad" = 0 ] || { echo "❌ 有门禁未通过（fail / skipped / cancelled 都算）"; exit 1; }
+          echo "✅ 六条门禁全部 success"
