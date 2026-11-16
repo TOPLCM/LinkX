@@ -1,0 +1,158 @@
+# 仓库目录与文件用途
+
+这份文件说明仓库里有什么、每一部分负责什么，方便你直接找到要读的那一处。
+
+第一次接触本仓库，建议的顺序是：[`README.md`](README.md) 看能做什么与怎么上手，
+[`Docs/Limitations.md`](Docs/Limitations.md) 看有什么限制，本文件看东西在哪里，
+[`Docs/Build.md`](Docs/Build.md) 看怎么从源码构建。想再深入某一面，按需要读
+[`Docs/Security.md`](Docs/Security.md)（安全与隐私口径）或
+[`Docs/Debug-Plane.md`](Docs/Debug-Plane.md)（调试控制面）。
+某一能力是哪一版进来的、当时改了什么，看 [`CHANGELOG.md`](CHANGELOG.md)。
+
+命名约定：目录首字母大写（`Crates/`、`Docs/`、`Scripts/`）；文件名小写加连字符；
+Rust crate 名带 `linkx-` 前缀（`debuglog` 除外，它是历史名）。
+
+## 一级目录
+
+```text
+LinkX/
+├── Crates/          共享 Rust 核心，电脑端与手机端链接的是同一份
+├── Platforms/       两个平台的壳：Windows 与 Android
+├── Docs/            面向使用者的文档
+├── Proto/           协议定义的单一来源
+├── Licenses/        第三方许可全文与出处记录
+├── svg/             图标源文件，两端图标与产品 Logo 的唯一真源
+├── 校验值.md        安装包 SHA-256 校验表
+├── Scripts/         构建、门禁与验收脚本
+├── .cargo/          交叉链接器约定与构建目录位置
+├── .github/         CI：格式检查、clippy、单测与门禁脚本
+└── 根文件            简介、变更、许可与 workspace 配置
+```
+
+## 根文件
+
+- `README.md` 产品简介：能做什么、怎么上手、技术框架、许可。
+- `CHANGELOG.md` 逐版变更（0.1.0 → 0.5.2）。
+- `DIRECTORY.md` 本文件。
+- `LICENSE` GPL-3.0-or-later 的 FSF 官方全文。
+- `THIRD_PARTY_LICENSES.md` 第三方代码与素材登记，以及随产物分发的义务。
+- `Cargo.toml` workspace 根：成员列表、`[workspace.package]` 版本单一源、依赖版本统一表。
+- `Cargo.lock` 依赖锁定，全部来自 crates.io，没有 git 源。
+- `rust-toolchain.toml` 锁定 Rust 通道版本，与 CI 和构建脚本保持一致。
+- `.gitattributes` 全仓文本强制 LF（`.sh` 一旦变成 CRLF 会直接坏构建链），二进制禁止转换。
+- `.gitignore` 排除构建产物与安装包，见文末「不在仓库里的东西」。
+
+## Crates/
+
+两端都链接这十个 crate，逻辑不分叉是这个仓库的结构约束。每个 crate 目录下都有自己的
+`Cargo.toml`，依赖版本一律走 workspace 统一表。
+
+`protocol` 是线格式层：13 字节帧头、帧的加密封装边界、64 字节 TLV 小载荷、蓝牙分片与重组
+（MTU 上限、乱序与重复的语义、内存上限），消息代码由 `build.rs` 从 `Proto/` 生成。
+`crypto` 是加密原语与身份：RSA-2048 长期身份、Noise XX 握手、每帧 AEAD
+（ChaCha20-Poly1305 + X25519 + SHA-256）、通道绑定、接收侧滑动窗口，退化公钥在这里拒掉。
+
+`session` 是会话状态机：配对与 6 位 SAS 计算、通道选择、心跳与退避、重连、
+文件 / 相册 / 配置的事件派发，信任库以指纹为主键。`lan` 是局域网数据面：UDP 广播与扫描、
+TCP 连接与读写线程、加密字节流的分帧、抗重放与背压窗口。`transfer` 是文件传输语义：
+`FILE_META` / `CHUNK` / `DONE` / `RESUME` 的字段编解码、分块切分与逐块 CRC32、发送与接收
+任务对象，以及接收侧文件名净化（`src/filename.rs` 是 Apache-2.0 上游的移植件，义务见
+`Licenses/localsend/`）。
+
+`storage` 是本地库，用 bundled SQLite，不起外部进程；`schema.sql` 是结构单一源，编译时嵌入。
+`ffi` 是核心的对外门面：只留版本常量（跨端版本号的单一真源）与安卓 JNI 导出
+（`feature = "jni"`，构建 `linkx_core.so` 时启用）；原先的 C ABI 句柄与 TX 事件队列没有生产调用方，
+已撤除 —— 安卓走 JNI 导出，Windows 直接调 Rust 侧，两端都不经过 C ABI。
+`debuglog` 与 `debugd` 是埋点和本机回环调试控制面，只在 `agent-debug` 特性下编译，默认关闭。
+`app` 是自检入口，`cargo run -p linkx-app` 打印 N/N PASS。
+
+## Platforms/
+
+电脑端是纯 Win32 + GDI 自绘：不用控件库、不用 Direct2D、也不用 WebView。
+`src/main.rs` 负责入口、单实例与每显示器 DPI 声明，`src/app.rs` 是工作线程与收发编排，
+`src/state.rs` 一份界面状态同时供渲染和命中判定，`src/render.rs` 与 `src/window.rs` 是绘制
+和窗口过程，`src/theme.rs`、`src/icons.rs` 是配色与描边图标。协议与传输相关的平台侧在
+`src/ble_central.rs`（电脑端是蓝牙主机）、`src/network.rs`、`src/transfer.rs`，
+落盘与开关在 `src/identity.rs`、`src/settings.rs`、`src/features.rs`。
+`src/icons_svg.rs` 是生成物，改图标请改 `svg/` 再跑生成脚本。
+系统消息走 `src/toast.rs`：弹 Windows 自己的通知卡（卡上两颗按钮靠 `linkx://` 回到主进程，
+口令一次性），弹不出去才回落 `src/tray.rs` 的托盘气泡；`src/ipc.rs` 是"第二次启动只转交、
+不再开一个窗口"的那条命名管道，也是按钮激活参数的入口。
+安装器源只有一份：`installers/LinkX-v4.wxs`，喂给 Windows 上的 WiX Toolset v5
+（正式交付包由它出，含中文向导、防火墙规则、许可页、`linkx://` 注册）。
+原先另有一条 Linux/wixl 链路（配 `installers/LinkX.wxs`），那份源自陈"携带 6 处已知向导缺陷"、
+从未在真机上走过安装向导，已随开源清理一起下线 —— 现在只有一条出包链路，也就没有"改了一份忘了另一份"的问题。
+
+手机端是 Kotlin + Jetpack Compose，经 JNI 调同一份核心。
+
+`MainActivity.kt` 只留 Activity 本体、底部导航与通用组件；七个页面各占一个文件，在
+`ui/` 下：`ConnectPage`（连接）、`NotificationsPage`（通知）、`ClipboardPage`（剪贴板）、
+`FilesPage`（文件与待发清单）、`MediaPage`（媒体）、`SettingsPage`（设置）、
+`AboutPage`（关于，含第三方许可清单入口），配色在 `ui/LinkXTheme.kt`。
+
+和核心的接缝分两层：`LinkxRuntime.kt` 是事件泵与状态机的持有者，它下面按能力分成
+`FileTransfer.kt`（文件传输）、`TcpChannel.kt`（TCP 通道）、`LanDiscovery.kt`（局域网发现），
+共用类型放在 `RuntimeTypes.kt`；`NativeCore.kt` 是 JNI 入口本身。
+
+`BlePeripheralService.kt` 是蓝牙外设角色与前台服务（广播必须带设备名，电脑端按名字认领设备
+并自动重连），`NlsService.kt` 是通知监听（正文与标题不进日志，只转发 10 分钟内的条目），
+`BootReceiver.kt` 负责开机与覆盖安装后拉起链路服务。其余按能力分文件：剪贴板同步
+（`ClipboardSync.kt`、以及给它借焦点的 `ClipboardSendActivity.kt`）、通知回复能力判定
+（`NotifCapability.kt`）、媒体控制（`MediaControl.kt`）、相册（`AlbumProvider.kt`）、
+电量（`BatteryMonitor.kt`）、身份与偏好存取（`IdentityStore.kt`、`AppPrefs.kt`）、
+功能开关（`Features.kt`）、前置条件检查（`LinkPrereqs.kt`）。
+`res/drawable/` 的矢量全部由 `svg/` 生成，与电脑端同几何；`app/proguard-rules.pro` 必须 keep 住 JNI 入口。
+
+## Docs/
+
+四份文档各自独立，按需读，不必顺序读。`Limitations.md` 是已知限制完整版：平台与 ROM 边界、
+容量上限、交互短板、签名现状。`Security.md` 是安全与隐私口径：数据路径、信任模型、加密实现、
+不可信输入、披露渠道。`Build.md` 是从源码构建：两端出包、GNU 目标的原因、门禁脚本、真机验收。
+`Debug-Plane.md` 是可选的调试控制面：边界、路由、动作、门控与自证方法，
+只在带 `agent-debug` 特性的构建里存在。
+
+## Proto/
+
+协议单一来源，两端实现都由它对齐。`buf.yaml` 与 `buf.gen.yaml` 是 lint 和代码生成配置；
+`linkx/v1/` 下按能力分文件：公共字段、设备信息与能力、心跳、通知转发与回复、剪贴板、
+文件传输、媒体控制、相册、跨端配置。同目录的 `tlv.rs` 是手写的蓝牙载荷与消息类型常量，
+与 proto 放在一处便于核对。
+
+## Licenses/
+
+`localsend/` 存上游的 Apache-2.0 全文、署名 NOTICE，以及 `PORTING.md`（移植范围与改动声明），
+对应 `Crates/transfer/src/filename.rs`。仓库内没有 vendored 代码。
+
+## svg/
+
+23 个 SVG 是图标唯一真源，含产品 Logo 几何。`Scripts/svg_assets.py` 由它生成两端矢量资源、
+`LinkX.ico` 与 `ic_launcher.xml`。分组是：Logo、侧边栏导航九枚、媒体控制七枚
+（播放/暂停/上一首/下一首/音量两档/曲目），以及上传下载、复制发送、电量等动作与状态若干。
+两端都没用上的图标不放进来——2026-10-11 清掉了随机播放与单曲循环两枚，产品本来就不切播放模式。
+
+## 安装包校验值
+
+`校验值.md` 登记当前版本交付物的清单与校验值，
+历版安装包与校验值在 Releases 页面按版本提供，仓库只保留当前源码与构建说明。
+
+## Scripts/
+
+Python 脚本只用标准库。构建出包：`build-mingw-windows.sh` 与 `build-msi-windows.sh` 出电脑端，
+`build-android-core.sh` 与 `build-android-apk.sh` 出手机端。门禁：`check-version-sync.sh` 查版本
+单一源，`check-protocol-sync.sh` 查协议与两端实现一致，`check-crypto-audit.sh` 查加密用法，
+`check-compose-kotlin-pair.sh` 查 Compose 与 Kotlin 版本配对，`check-release-clean.sh` 查交付产物
+无调试残留，`check-install-single.sh` 查安装份数与作用域，`check-comment-hygiene.sh` 查注释卫生。
+`check-release-ledger.py` 核对 `校验值.md` 登记的哈希与大小，本地出包后跑，不进 CI。
+两个 PowerShell 门禁只在 Windows 上跑：`check-msi-tables.ps1` 用 Windows Installer 的 COM 接口
+读 MSI 的表，核对安装作用域、目录挂载、卸载清理项、防火墙动作、许可页闸门与随包许可文件；
+`check-msi-uninstall.ps1` 核对卸载前的退出保护与收尾动作表级接线。
+
+图标链是 `svg_assets.py` 加两个模板 `launcher_icon.tmpl`、`vector_icon.tmpl`。
+
+## 不在仓库里的东西
+
+| 路径 | 是什么 | 为什么不在 |
+|---|---|---|
+| `Target/` | cargo 构建目录 | 构建产物 |
+| `Release/Windows/`、`Release/Android/` | 当前版本的安装包 | 二进制走 Releases 页面，校验值登记在 `校验值.md` |
+| `*.jks`、`*.keystore` | 签名密钥 | 密钥不入库 |
