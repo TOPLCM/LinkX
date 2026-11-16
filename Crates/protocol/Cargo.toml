@@ -1,0 +1,17 @@
+[package]
+name = "linkx-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "LinkX 协议层：13B 帧头、消息类型、TLV、BLE 分片重组（Y3/Y6）"
+
+[dependencies]
+prost.workspace = true
+thiserror.workspace = true
+
+[build-dependencies]
+prost-build.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
