@@ -1,0 +1,33 @@
+# 全仓文本一律 LF。
+# 项目源自 Linux 宿主，源码与 Scripts/*.sh 均为 LF；若被转换为 CRLF，
+# bash 脚本会以 $'\r': command not found 失败，等于回滚/重新 clone 时损坏构建链。
+# 本文件优先级高于 core.autocrlf（本机该值为 true）。
+* text=auto eol=lf
+
+# 二进制：禁止任何换行转换与 diff
+*.png binary
+*.jpg binary
+*.ico binary
+*.ttf binary
+*.apk binary
+*.idsig binary
+*.msi binary
+*.exe binary
+*.dll binary
+*.so binary
+*.a binary
+*.jks binary
+*.keystore binary
+*.7z binary
+*.zip binary
+*.gz binary
+*.tar binary
+*.cub binary
+*.pdb binary
+*.lib binary
+*.obj binary
+
+# Windows 批处理必须保持 CRLF：cmd.exe 对纯 LF 的 .bat 解析异常，
+# gradlew.bat 是 Android 出包入口，改成 LF 会直接构建失败。
+*.bat text eol=crlf
+*.cmd text eol=crlf
