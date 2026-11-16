@@ -1,0 +1,35 @@
+// 文件传输（FILE_* 系列消息的 body）
+syntax = "proto3";
+package linkx.v1;
+
+message FileMeta {
+  string name = 1;
+  uint64 size = 2;
+  fixed64 file_id = 3;      // 本次传输唯一 id
+  uint32 chunk_size = 4;    // 默认 262144（256KB 分块）
+  bytes sha256 = 5;         // 整文件 SHA-256（32B）；空 = 发送端边发边算，摘要改由 FILE_DONE 交付
+  uint32 crc32 = 6;         // 整文件 CRC32（快速预检；逐块 CRC32 已随 FileChunk 携带）
+  fixed64 album_id = 7;     // 非 0 = 相册「取原图」的应答，值 = 相册里的照片 id
+                            // 收端据此把它送到用户选的导出目录，而不是落进收件目录。
+}
+
+message FileChunk {
+  fixed64 file_id = 1;
+  uint32 index = 2;
+  bytes data = 3;           // <= chunk_size
+  uint32 crc32 = 4;         // 本块 CRC32（新增字段，旧端忽略未知 tag）
+}
+
+message FileDone {
+  fixed64 file_id = 1;
+  bool ok = 2;
+  optional string error = 3;
+  bytes sha256 = 4;         // 整文件 SHA-256（发端随分块增量算出）；空 = 摘要只在 FILE_META 里给（旧端）
+  bool cancelled = 5;       // 用户取消收尾（此时 ok 恒为 false）：收端删残留文件、显示「已取消」而不是「失败」；旧端不带 = 未取消
+}
+
+// 收端 → 发端「停止发送」：收端没有别的办法掐断一条正在进来的流（0x33）
+message FileCancel {
+  fixed64 file_id = 1;
+  string reason = 2;        // 给用户看的原因；可为空（接收端补默认文案）
+}
