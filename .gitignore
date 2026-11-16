@@ -1,0 +1,31 @@
+# 构建产物与本地缓存
+/Target/
+**/target/
+**/build/
+**/.gradle/
+**/.kotlin/
+**/local.properties
+Platforms/Android/.idea/
+Platforms/Android/*.iml
+__pycache__/
+*.pyc
+
+# 签名密钥（出包脚本在本机自签测试密钥，位置可用 LINKX_TEST_KEYSTORE 指定）
+*.keystore
+*.jks
+*.pem
+/.local-keys/
+
+# 本地产物与临时物
+/Temp/
+Release/Debug/
+/Release/Windows/*
+/Release/Android/*
+/Release/Docs/*.tar.gz
+/Release/Docs/*.zip
+/Release/Docs/*.sha256
+/Release/*.zip
+
+
+# 本地生成标记
+.generated-copy
