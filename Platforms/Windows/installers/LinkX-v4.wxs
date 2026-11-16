@@ -1,0 +1,628 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  LinkX Windows 安装包源（**WiX v4/v5 方言**，xmlns=http://wixtoolset.org/schemas/v4/wxs）
+
+  与同目录 LinkX.wxs（wixl / msitools 方言）的关系：功能等价移植，不是另一套设计。
+  两份源文件共存的原因：wixl 是 Linux 侧唯一能产出 MSI 的链路，WiX v4/v5 是 Windows
+  主机的正式链路。构建脚本用 WIX_V4_WXS 选择：
+
+    Linux  ：bash Scripts/build-msi-windows.sh                      # 默认 wixl，吃 LinkX.wxs
+    Windows：MSI_ENGINE=wix WIX_V4_WXS=Platforms/Windows/installers/LinkX-v4.wxs \
+                  bash Scripts/build-msi-windows.sh                 # 吃本文件
+
+  本文件用 WiX Toolset 5.0.2 在 Windows 主机上 `wix build -arch x64` 构建通过，表结构与 ICE
+  校验按 Scripts/build-msi-windows.sh 的断言核对过，内嵌 CAB 还原后与源文件逐字节一致。
+  真实 msiexec 图形安装 → 卸载已在开发机跑通：七页向导逐页截图核对中文渲染，卸载后安装目录、
+  桌面快捷方式、HKCU\SOFTWARE\LinkX 与防火墙规则均无残留。
+
+  移植时相对 wixl 版的三点调整（v4/v5 方言差异，非行为变化）：
+    * 预定义目录用 <StandardDirectory>；wixl 的 <Directory Id="TARGETDIR" Name="SourceDir"> 外壳取消。
+    * <Media> 改为 <MediaTemplate>；<Package InstallScope> 改为 <Package Scope>；
+      <Package Description/Comments> 改为 <SummaryInformation>。
+    * <Product Id=...> 不再手写（v4 自动生成并写入 ProductCode），UpgradeCode 与全部 Component
+      Guid 原样保留 —— 这两组 GUID 是跨版本升级与组件归并的关键，改动会让用户旧安装无法升级。
+
+  文本语言（两份源不同，别当成笔误）：
+    * 本文件（WiX v5）向导文本用简体中文。实测依据：向 Dialog 表塞一条中文标题重新出包，
+      产物字符串池里 UTF-8 中文字节原样保留，用 MsiRecordGetString 读回仍是正确汉字。
+    * wixl 版（LinkX.wxs）必须保持 ASCII 英文 —— wixl 0.103 的字符串池存不下非 ASCII（实测）。
+    * <SummaryInformation> 例外，两份都保持 ASCII：WiX v5.0.2 会把其中的非 ASCII 字符替换成 0x7f，
+      表现是「添加/删除程序 → 更多信息」里一串问号（实测，与源文件编码、BOM、Codepage 无关）。
+    * 自定义向导 7 页（Welcome / License / InstallDir / Components / VerifyReady /
+      Progress / Exit）全部保留 —— WiX v4/v5 仍支持 <UI>/<Dialog>/<Control>/<TextStyle>/
+      <Publish>/<Subscribe>/<InstallUISequence>，已实测。
+    * 防火墙仍走 netsh 自定义动作（类型 50，Source=[NETSH_EXE]）。不用 fw:FirewallException
+      是因为它需要单独的 firewall 扩展程序集，当前 wix-5.0.2 nupkg 未包含，会报
+      WIX0144 extension not found；而构建脚本第 124-135 行校验的正是 FwAdd/FwDel 与 NETSH_EXE。
+    * 卸载/升级前先请正在运行的 LinkX 退出，用的是 util:CloseApplication（Restart Manager）。
+      这一条**只有 WiX 方言能做**：wixl 没有 util 扩展，所以 wixl 版（LinkX.wxs）没有这道保护，
+      两份源在这一处不是功能等价 —— 正式包走 WiX 链路，wixl 只用于 Linux 侧应急出包。
+    * 带上 `-ext WixToolset.Util.wixext` 之后 WiX 开始按 `<Package Codepage>` 校验字符串，
+      中文向导文本会整片报 WIX0311。解法是写 `Codepage="936"`，不用 `-culture zh-CN` —— 后者会
+      改包语言，而包语言参与升级匹配（实测两条都能出包，只有 936 这条不动升级语义）。
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+  <Package Name="LinkX"
+           Codepage="936"
+           Manufacturer="LinkX Project"
+           Version="@VERSION@"
+           UpgradeCode="46B038A0-4B5F-49A9-8673-8DF89A4DE899"
+           Scope="perUser"
+           Compressed="yes">
+
+    <!-- per-user：无需 UAC，默认装到 %LOCALAPPDATA%\Programs\LinkX -->
+    <!--
+      这里**不能写中文**（WiX v5.0.2 会把非 ASCII 字符替换成 0x7f），详见文件头「文本语言」一条。
+      注：wixl 版（LinkX.wxs）的 <Package Description/Comments> 实测**能**存中文，两份源在此处
+      无法保持字面一致，只能接受这一处差异。
+    -->
+    <SummaryInformation Description="LinkX - cross-device link tool (test build): notification sync / clipboard sharing / file transfer"
+                        Comments="GPL-3.0-or-later; pure local P2P, no cloud service"
+                        Manufacturer="LinkX Project"/>
+
+    <MediaTemplate EmbedCab="yes"/>
+
+    <!--
+      SourceFile / Source 的相对路径基准是**当前工作目录**（与 wixl 一致，不是 .wxs 所在目录），
+      构建脚本以仓库根为 cwd 调用 wix build，故下面两条路径都写成仓库根相对路径。
+      已实测：写成相对 .wxs 目录（..\..\Platforms\...）会 WIX0103 找不到文件。
+    -->
+    <Icon Id="LinkXIcon.ico" SourceFile="Platforms/Windows/LinkX.ico"/>
+    <Property Id="ARPPRODUCTICON" Value="LinkXIcon.ico"/>
+    <Property Id="ARPNOMODIFY" Value="1"/>
+
+    <!-- 自定义安装目录（InstallDirDlg 的 PathEdit 绑定此属性，值必须是 Directory 表里的 Id） -->
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" Secure="yes"/>
+
+    <!--
+      把用户选过的安装目录**记回注册表并在每次运行前读回来**。
+
+      MSI 每次运行都按 Directory 表重算目标目录，用户改的路径不会自己留下来。后果不是"看着别扭"
+      而是**假卸载**：包装到 D:\LinkX 之后卸载，日志里 `Dir (target): Key: INSTALLFOLDER` 仍然是
+      `%LOCALAPPDATA%\Programs\LinkX`，RemoveFiles 打在一个从没放过文件的目录上，于是卸载返回 0、
+      注册表清干净、D 盘那份本体原地留着。同一处还顺带修掉"升级时又装回默认目录"。
+      判据（探针实测，只改这一处）：修完之后卸载日志变成 `Dir (target): ... Object: D:\LinkXProbeD\`，
+      目录整个删掉；修之前留文件。探针本身在内部走查记录里（不进公开仓库）。
+    -->
+    <Property Id="INSTALLFOLDER" Secure="yes">
+      <RegistrySearch Id="RecallInstallFolder" Root="HKCU" Key="Software\LinkX"
+                      Name="InstallDir" Type="raw"/>
+    </Property>
+
+    <!--
+      组件选择默认值。
+
+      ⚠ MSI CheckBox 的坑：勾选态的判定是「该属性是否已定义」，把默认值写成 Value="0" 仍算
+      「已定义」→ 界面显示为已勾选，而条件 OPT_X="1" 判假 → 界面与行为相反（"看着勾了、实际没装"）。
+      故「默认不勾选」必须**不定义该属性**，而不是赋 "0"。
+    -->
+    <Property Id="OPT_STARTMENU" Value="1" Secure="yes"/>
+    <!-- OPT_AUTOSTART 故意不定义 = 默认不勾选 -->
+    <!--
+      防火墙默认勾选：MSI 必须注册防火墙入站规则，否则搜不到设备是必现现象。
+      注意 per-user 安装不提权时 netsh 无法建规则，该动作会静默跳过（复选框文案已披露）；
+      要真正生效需以管理员身份运行安装器。
+    -->
+    <Property Id="OPT_FIREWALL" Value="1" Secure="yes"/>
+
+    <!-- 防火墙自定义动作（类型 50）用的 netsh 全路径属性 -->
+    <Property Id="NETSH_EXE" Value="[SystemFolder]netsh.exe" Secure="yes"/>
+
+    <!--
+      卸载时连程序自己写的数据目录一起清掉：%APPDATA%\LinkX 里是 settings.ini、设备身份、
+      配对表与日志。MSI 不会碰它（不是这个包装出来的文件），留着就是用户眼里的"假卸载 / 没卸干净"。
+      三条约束：
+        * 只在真卸载时跑，并且**升级不算卸载** —— 升级时把配对删了，用户升个级就得重新配对，
+          与防火墙规则那条同一条判据（NOT UPGRADINGPRODUCTCODE）。
+        * RemoveFile / RemoveFolder 只能删空目录，日志在子目录里，所以走 rmdir /S /Q。
+        * 类型 51 先把 cmd.exe 展开成真实路径（同 NETSH_EXE：类型 50/114 的 Source 取属性字面值）。
+      探针实测：Roaming 下先放 settings.ini 与 Logs/a.ndjson，卸载之后整个目录不见。
+    -->
+    <Property Id="CMD_EXE" Value="cmd.exe" Secure="yes"/>
+    <CustomAction Id="SetCmdExe" Property="CMD_EXE" Value="[SystemFolder]cmd.exe"/>
+    <CustomAction Id="CleanUserData" Property="CMD_EXE" Execute="immediate" Return="ignore"
+                  ExeCommand="/C if exist &quot;[AppDataFolder]LinkX&quot; rmdir /S /Q &quot;[AppDataFolder]LinkX&quot; &amp; if exist &quot;[LocalAppDataFolder]LinkX&quot; rmdir /S /Q &quot;[LocalAppDataFolder]LinkX&quot;"/>
+
+    <!-- 主要升级：检测同 UpgradeCode 的旧版本，先卸旧再装新 -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="电脑上已安装更新版本的 LinkX，请先卸载当前版本。"/>
+
+    <UIRef Id="LinkX_UI"/>
+
+    <!-- 每用户目录：%LOCALAPPDATA%\Programs\LinkX（不再硬编码 C:\Program Files） -->
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="LinkX"/>
+      </Directory>
+    </StandardDirectory>
+
+    <!-- 开始菜单快捷方式目录 -->
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ProgramMenuDir" Name="LinkX"/>
+    </StandardDirectory>
+
+    <!-- 桌面：per-user 安装时 DesktopFolder 解析到当前用户桌面，不需要管理员权限 -->
+    <StandardDirectory Id="DesktopFolder"/>
+
+    <!--
+      防火墙自定义动作（类型 114 = Exe + Source=Property + ExeCommand + Continue/Return=ignore）
+
+      ⚠ 类型 50/114 动作的 Source 取属性**字面值**，MSI 不做二次展开：若 NETSH_EXE 直接写
+      "[SystemFolder]netsh.exe"，netsh 会被当成名为 "[SystemFolder]netsh.exe" 的文件去执行并报
+      MSI 错误 1721，而 Return="ignore" 让失败完全静默 —— 安装照样"成功"，防火墙规则却从未建过
+      （WiX 的 WIX1077 警告提示的正是这件事）。
+      修法：用类型 51（Property + Value）在动作前把 NETSH_EXE 设成**已展开**的真实路径 ——
+      MSI 会展开类型 51 的 Target，于是 FwAdd/FwDel 拿到 System32 目录下的 netsh.exe 全路径。
+    -->
+    <CustomAction Id="SetNetshAdd" Property="NETSH_EXE" Value="[SystemFolder]netsh.exe"/>
+    <CustomAction Id="SetNetshDel" Property="NETSH_EXE" Value="[SystemFolder]netsh.exe"/>
+    <CustomAction Id="FwAdd" Property="NETSH_EXE"
+                  ExeCommand="advfirewall firewall add rule name=&quot;LinkX&quot; dir=in action=allow protocol=TCP localport=55676 profile=private"
+                  Return="ignore"/>
+    <!-- 删除必须带上产品自身的过滤条件：`delete rule name="LinkX"` 会把机器上
+         **所有**叫 LinkX 的规则一并删掉（netsh 文档：多个匹配项则删除所有匹配），别人家的同名规则
+         会造成误删。加上 protocol/localport/dir 三项，命中范围收回到产品添加的那一条。 -->
+    <CustomAction Id="FwDel" Property="NETSH_EXE"
+                  ExeCommand="advfirewall firewall delete rule name=&quot;LinkX&quot; protocol=TCP localport=55676 dir=in"
+                  Return="ignore"/>
+
+    <!--
+      卸载与升级前，先把正在运行的 LinkX 请出去（util:CloseApplication 走 Restart Manager）。
+
+      为什么必须有这一条：程序活着的时候，安装器照样把注册表项和防火墙规则清干净、照样报"卸载
+      完成"，于是电脑上一个抱着旧链路跑的本体配上一份已被清空的登记 —— 重装之后表现成各种怪 bug。
+      Windows Installer 自己那套"程序正在使用"的弹窗只在有人盯着点的时候管用：静默卸载没有 UI，
+      它就把文件排到重启后再删，然后正常返回成功。
+
+      位置：扩展生成的动作默认排在 3999，即 RemoveFiles(3500) 之后 —— 对卸载太晚，这里用 override
+      挪到 InstallValidate 之前，让"退出"发生在任何花费与删除动作之前。
+
+      语义：该动作发的是裸 `WM_CLOSE`。程序侧把"用户按 ✕"（`WM_SYSCOMMAND`/`SC_CLOSE`）与"外部请
+      进程结束"（裸 `WM_CLOSE`）分开处理：前者按设置问一句，后者直接收尾。两边任何一边写错，表现
+      都是卸载停在半路等一个没人看的弹窗，且不报任何错误。
+
+      超时兜底不能用 `TerminateProcess`（实测踩出来的）：它的实现要另调一个 deferred 动作，而
+      deferred 只能在 InstallInitialize(1500) 之后的脚本阶段跑，本守卫排在 1397 → `MsiDoAction`
+      直接失败（日志 "failed to schedule CloseApplicationsDeferred action"，界面摆出"错误代码 2762"，
+      整场安装回滚）。守卫也不能往后挪去迁就 deferred：那样 InstallValidate(1400) 先做成本核算，
+      系统的"以下应用程序应该关闭"弹窗又回来了。`EndSessionMessage="yes"` 也不行：实测它并不会真的
+      结束进程，弹窗照摆 —— 旧本体把裸 `WM_CLOSE` 当成用户按 ✕，弹出"关闭 LinkX?"死等，升级到带
+      守卫的包时安装就停在那个弹窗上不动。
+
+      兜底因此改成紧随其后的一条 `taskkill /IM linkx.exe /F`：礼貌那条先跑完（新版本体 1 秒内自己
+      收尾），还活着的才轮到强杀。`Timeout="5"` 按这个搭配定：本体配合时等不满，不配合时多等只是白等。
+
+      两条都按进程名匹配，会连带结束同名的开发版实例（`cargo run` 起的那份），这是已知代价：程序没有
+      "只在退出时才落盘"的用户数据（设置与身份改动即写、日志按行写），换来任何情况下都不再出现
+      "卸载报成功、本体还在跑"。
+    -->
+    <util:CloseApplication Id="CloseLinkXBeforeRemoval"
+                           Target="linkx.exe"
+                           Timeout="5"
+                           CloseMessage="yes"
+                           RebootPrompt="no"/>
+
+    <!-- 强杀兜底。路径要先用类型 51 展开成真实路径，理由与 NETSH_EXE 相同（见上面防火墙那段注释）。
+         Return="ignore"：本体已经自己退出才是最常见的情况，此时 taskkill 报"没有找到进程"，不能
+         让它把整场安装带崩。 -->
+    <CustomAction Id="SetTaskkill" Property="TASKKILL_EXE" Value="[SystemFolder]taskkill.exe"/>
+    <CustomAction Id="KillLinkX" Property="TASKKILL_EXE" ExeCommand="/IM linkx.exe /F" Return="ignore"/>
+
+    <!--
+      ⚠ 卸载侧不能用 "&FirewallFeature = 3"：**卸载时 `&Feature` 判假**（日志里明明写着
+      Installed: Local，条件仍为 false）→ FwDel 从不执行 → 卸载后防火墙规则残留。
+      故卸载/去选用 REMOVE~="ALL" 判定；`!Feature = 2` 覆盖"改选时取消勾选防火墙"。
+    -->
+    <InstallExecuteSequence>
+      <!-- 上面那条 CloseApplication 的动作由扩展生成，默认排在 3999，即 RemoveFiles 之后 ——
+           对卸载来说太晚。`override` 是把生成行改位置的写法（直接写同名 Action 会撞主键）。
+           三个号都写死而不写 `Before="InstallValidate"`：礼貌退出、展开 taskkill 路径、强杀兜底
+           三条都要挤在 InstallValidate(1400) 之前，写同一个 Before 会撞号，挨着排又会撞上
+           WIX0179（序号之间必须留得下唯一的整数）。 -->
+      <Custom Action="override Wix4CloseApplications_$(sys.BUILDARCHSHORT)" Sequence="1390"/>
+      <Custom Action="SetTaskkill" Sequence="1395"/>
+      <Custom Action="KillLinkX" Sequence="1398"/>
+      <Custom Action="SetNetshAdd" Before="FwAdd"/>
+      <!-- 条件必须直接判定属性本身，不能只看 `&FirewallFeature = 3`：把功能加进本地安装的动作
+           挂在向导复选框的 Publish 事件上，于是 `/qn OPT_FIREWALL=1`（属性标了 Secure="yes"，
+           本就是给命令行用的）静默无效 —— 日志永远是 "Skipping action: FwAdd (condition is false)"，
+           局域网收不到对端连接。向导里取消勾选会把 OPT_FIREWALL 写成空 → 不加规则；
+           静默安装要关规则传 `OPT_FIREWALL=`。 -->
+      <Custom Action="FwAdd" After="InstallFiles"
+              Condition="OPT_FIREWALL=&quot;1&quot; AND NOT Installed"/>
+      <Custom Action="SetNetshDel" Before="FwDel"/>
+      <!--
+        防火墙规则：先清后建，两趟都要照顾到。
+
+        升级时删规则，但**升级不算卸载**：`REMOVE~="ALL"` 在"升级顺带卸掉旧版本"时也成立，
+        而 FwAdd 的条件是 `NOT Installed`（升级时不重跑）—— 两边一凑，升级完防火墙规则就没了，
+        表现是"升过级就连不上手机"，所以必须再挡一道 NOT UPGRADINGPRODUCTCODE。
+
+        ⚠ 但 ProductCode 由 WiX 每次构建自动生成，所以**每次装新版都是一次升级**
+        （同 UpgradeCode + AllowSameVersionUpgrades）。实测（2026-10-29 安装日志）：
+        FwAdd 在"新装那一趟"会跑（那时 Installed 还是空的），
+        而 FwDel 在"旧产品移除那一趟"被 NOT UPGRADINGPRODUCTCODE 挡住 —— 两边一凑，
+        装几次就有几条同名同端口的入站规则堆在防火墙里（实测装完是 2 条）。
+        修法：把"新装/升级"这一路也纳入 FwDel，顺序上 FwDel（RemoveFiles 之前）
+        仍早于 FwAdd（InstallFiles 之后），所以是"先清后建"；真卸载那一路不变。
+        升级中取消勾选防火墙的那一路仍由真卸载那条兜底，不动。
+      -->
+      <Custom Action="FwDel" Before="RemoveFiles"
+              Condition="(REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE) OR (OPT_FIREWALL=&quot;1&quot; AND NOT Installed)"/>
+      <!-- 数据目录同一条判据：升级要保住配对，真卸载才连配置一起清 -->
+      <Custom Action="SetCmdExe" Before="CleanUserData"/>
+      <Custom Action="CleanUserData" Before="RemoveFiles"
+              Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE"/>
+    </InstallExecuteSequence>
+
+    <!-- 功能/组件：主程序恒装；开始菜单默认装；开机自启 / 防火墙默认不装（Level=2 > INSTALLLEVEL=1） -->
+    <Feature Id="MainFeature" Title="LinkX 主程序（必装）" Description="LinkX 主程序与注册表信息" Level="1">
+      <ComponentRef Id="MainExecutable"/>
+      <ComponentRef Id="ProtocolHandler"/>
+    </Feature>
+    <Feature Id="StartMenuFeature" Title="开始菜单快捷方式" Description="在开始菜单创建 LinkX 快捷方式" Level="1">
+      <ComponentRef Id="ProgramMenuDirComponent"/>
+    </Feature>
+    <Feature Id="DesktopShortcutFeature" Title="桌面快捷方式" Description="在桌面创建 LinkX 快捷方式" Level="1">
+      <ComponentRef Id="DesktopShortcutComponent"/>
+    </Feature>
+    <Feature Id="AutoStartFeature" Title="登录时自动启动" Description="登录 Windows 后自动启动 LinkX（HKCU Run）" Level="2">
+      <ComponentRef Id="AutoStartEntry"/>
+    </Feature>
+    <Feature Id="FirewallFeature" Title="防火墙规则" Description="为专用网络添加 TCP 55676 入站规则" Level="2">
+      <ComponentRef Id="FirewallMarker"/>
+    </Feature>
+  </Package>
+
+  <!-- 主程序 + HKCU\SOFTWARE\LinkX 版本/路径信息 -->
+  <Fragment>
+    <Component Id="MainExecutable" Directory="INSTALLFOLDER" Guid="C6E12426-9B4F-40F5-99AC-4F1695815BBC">
+      <!-- 本体路径由 `Scripts/build-msi-windows.sh` 按 ARCH 注入（@EXE@）：x64 → gnu 产物、
+           arm64 → msvc 产物。这里**写死一条路径就等于让两个安装包共用同一个 exe**——
+           0.5.3 真机审查抓到过：包名与 -arch 都是 arm64，装进去的却是 x64 本体，
+           而当时所有判据都在"编出来的那份 exe"上做文章，没一条看过包里的 payload。
+           现在由 Scripts/check-msi-payload.ps1 从包里取出本体核哈希与 PE 机器码。 -->
+      <File Id="LinkXExe" Name="linkx.exe" Source="@EXE@"/>
+      <!--
+        GPL-3.0 §4 / Apache-2.0 §4(a) 都要求分发时随附许可副本；许可页第 2 屏的文案也承诺
+        「see the LICENSE file in the installation folder」—— 缺该文件即为虚假陈述。
+        LocalSend 的 vendored 代码已从仓库删除，但**生产路径里仍在用它的移植版**
+        （`Crates/transfer/src/filename.rs`），所以许可全文与署名照样随包分发，出处在
+        `Licenses/localsend/`。
+      -->
+      <File Id="LicenseFile" Name="LICENSE" Source="LICENSE"/>
+      <File Id="ThirdPartyFile" Name="THIRD_PARTY_LICENSES.md" Source="THIRD_PARTY_LICENSES.md"/>
+      <File Id="ApacheLocalSendFile" Name="LICENSE-localsend.txt"
+            Source="Licenses/localsend/LICENSE"/>
+      <File Id="LocalSendNoticeFile" Name="NOTICE-localsend.txt"
+            Source="Licenses/localsend/NOTICE"/>
+      <!-- Apache-2.0 §4(d)：声明改动的那份 PORTING.md 也要随包走，否则「已声明改动」的义务没履行。 -->
+      <File Id="LocalSendPortingFile" Name="PORTING-localsend.md"
+            Source="Licenses/localsend/PORTING.md"/>
+      <!--
+        per-user 安装的硬要求（ICE38）：组件的 KeyPath 必须是 HKCU 下的注册表项，不能是文件。
+        若把 KeyPath 放在 <File> 上，wix msi validate 报 ICE38 error。
+      -->
+      <RegistryValue Root="HKCU" Key="SOFTWARE\LinkX" Name="InstallPath" Type="string" Value="[INSTALLFOLDER]" KeyPath="yes"/>
+      <RegistryValue Root="HKCU" Key="SOFTWARE\LinkX" Name="Version" Type="string" Value="@VERSION@"/>
+      <RegistryValue Root="HKCU" Key="SOFTWARE\LinkX" Name="Publisher" Type="string" Value="LinkX Project"/>
+      <!-- 上面那条 RecallInstallFolder 读的就是这个值：记下真实落点，卸载/升级才找得到目录 -->
+      <RegistryValue Root="HKCU" Key="SOFTWARE\LinkX" Name="InstallDir" Type="string" Value="[INSTALLFOLDER]"/>
+      <!--
+        卸载清残留（随组件卸载移除）：先移除安装目录，再移除其父目录。
+        ProgramsFolder 是 %LOCALAPPDATA%\Programs —— 非空时 RemoveFolder 会静默跳过，
+        因此不会影响同样使用该目录的其他程序（VS Code、Git 等）。
+      -->
+      <RemoveFolder Id="RemoveInstallFolder" On="uninstall" Directory="INSTALLFOLDER"/>
+      <RemoveFolder Id="RemoveProgramsFolder" On="uninstall" Directory="ProgramsFolder"/>
+    </Component>
+  </Fragment>
+
+  <!--
+    通知卡按钮的回话通道：`linkx://` 注册在 HKCU\Software\Classes（per-user，不提权也写得进去）。
+    系统点「复制验证码」/「发送」时另起一个 linkx.exe 并把 URI 作为参数交给它，第二实例原样转交给
+    运行中的实例（见 Platforms/Windows/src/toast.rs）。参数里只有一次性口令，对不上就丢，
+    所以这条注册项本身不构成"别的程序能替用户发回复"的口子。卸载时由 RemoveRegistryValues 回收。
+  -->
+  <Fragment>
+    <Component Id="ProtocolHandler" Directory="INSTALLFOLDER" Guid="{C4281F77-8154-435C-97D1-6504D0469533}">
+      <RegistryValue Root="HKCU" Key="Software\Classes\linkx" Type="string"
+                     Value="URL:LinkX 通知卡按钮" KeyPath="yes"/>
+      <RegistryValue Root="HKCU" Key="Software\Classes\linkx" Name="URL Protocol" Type="string" Value=""/>
+      <RegistryValue Root="HKCU" Key="Software\Classes\linkx\shell\open\command" Type="string"
+                     Value="&quot;[INSTALLFOLDER]linkx.exe&quot; &quot;%1&quot;"/>
+    </Component>
+  </Fragment>
+
+  <!-- 可选组件：开机自启（HKCU\...\Run），卸载时由 MSI 自动移除该注册表值 -->
+  <Fragment>
+    <Component Id="AutoStartEntry" Directory="INSTALLFOLDER" Guid="5F2A9C31-7D64-4E88-9B21-0C3E5A7D9F14">
+      <RegistryValue Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Run"
+                     Name="LinkX" Type="string" Value="&quot;[INSTALLFOLDER]linkx.exe&quot;"
+                     KeyPath="yes"/>
+    </Component>
+  </Fragment>
+
+  <!-- 可选组件：防火墙规则标记（记录规则名，供卸载/人工核对） -->
+  <Fragment>
+    <Component Id="FirewallMarker" Directory="INSTALLFOLDER" Guid="8C4D1E72-3A95-4B60-8E47-2F6B9D0C1A58">
+      <RegistryValue Root="HKCU" Key="SOFTWARE\LinkX" Name="FirewallRuleName"
+                     Type="string" Value="LinkX" KeyPath="yes"/>
+    </Component>
+  </Fragment>
+
+  <!-- 开始菜单快捷方式 -->
+  <Fragment>
+    <Component Id="ProgramMenuDirComponent" Directory="ProgramMenuDir" Guid="7E4B1C42-9D3A-4E5F-9C77-2A8F5B6D4E31">
+      <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuDir" Name="LinkX"
+                Target="[INSTALLFOLDER]linkx.exe" WorkingDirectory="INSTALLFOLDER"
+                Icon="LinkXIcon.ico" Description="跨设备互联工具"/>
+      <RegistryValue Root="HKCU" Key="Software\LinkX" Name="StartMenu" Type="integer"
+                     Value="1" KeyPath="yes"/>
+      <RemoveFolder Id="RemoveProgramMenuDir" On="uninstall" Directory="ProgramMenuDir"/>
+    </Component>
+  </Fragment>
+
+  <!--
+    桌面快捷方式。只放开始菜单是不够的：这是一款"每天点开用一下"的桌面工具，
+    普通用户装完找不到图标就等于没装上。KeyPath 用 HKCU 值（不能给 .lnk 本身做 KeyPath，
+    那是 self-repair 反模式），卸载时组件连同快捷方式一起回收。
+  -->
+  <Fragment>
+    <Component Id="DesktopShortcutComponent" Directory="DesktopFolder" Guid="{A7C1E5D2-6B48-4F03-9E2D-1C5A8B74D390}">
+      <Shortcut Id="DesktopShortcut" Directory="DesktopFolder" Name="LinkX"
+                Target="[INSTALLFOLDER]linkx.exe" WorkingDirectory="INSTALLFOLDER"
+                Icon="LinkXIcon.ico" Description="跨设备互联工具"/>
+      <RegistryValue Root="HKCU" Key="Software\LinkX" Name="DesktopShortcut" Type="integer"
+                     Value="1" KeyPath="yes"/>
+    </Component>
+  </Fragment>
+
+  <Fragment>
+    <UI Id="LinkX_UI">
+      <!-- 中文字形 Segoe UI 没有，靠系统字体链接兜底不稳定，直接点微软雅黑；字号不动，避免撑破既有控件高度 -->
+      <TextStyle Id="LinkX_Font_Title" FaceName="Microsoft YaHei" Size="9" Bold="yes"/>
+      <TextStyle Id="LinkX_Font_Normal" FaceName="Microsoft YaHei" Size="8"/>
+      <Property Id="DefaultUIFont" Value="LinkX_Font_Normal"/>
+
+      <!-- 1) Welcome -->
+      <Dialog Id="WelcomeDlg" Width="370" Height="270" Title="[ProductName] 安装向导">
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0"/>
+        <Control Id="Title" Type="Text" X="20" Y="15" Width="330" Height="18" Transparent="yes" NoPrefix="yes"
+                 Text="欢迎使用 [ProductName] 安装向导"/>
+        <Control Id="WelcomeText" Type="Text" X="20" Y="60" Width="330" Height="130" Transparent="yes" NoPrefix="yes"
+                 Text="本向导将引导您完成 [ProductName] [ProductVersion] 的安装。&#10;&#10;这是当前用户的安装：不需要管理员权限，程序装在您自己的账户目录里。&#10;&#10;点击「下一步」继续，点击「取消」退出。"/>
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0"/>
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Disabled="yes" Text="上一步"/>
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="下一步">
+          <Publish Event="NewDialog" Value="LicenseDlg"/>
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="取消">
+          <Publish Event="EndDialog" Value="Exit"/>
+        </Control>
+      </Dialog>
+
+      <!-- 2) License agreement (must accept to continue) -->
+      <Dialog Id="LicenseDlg" Width="370" Height="270" Title="[ProductName] 许可协议">
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0"/>
+        <Control Id="Title" Type="Text" X="20" Y="15" Width="330" Height="18" Transparent="yes" NoPrefix="yes"
+                 Text="许可协议"/>
+        <Control Id="LicenseNotice" Type="Text" X="20" Y="60" Width="330" Height="150" Sunken="yes" NoPrefix="yes"
+                 Text="LinkX 以 GNU 通用公共许可证第 3 版（GPL-3.0-or-later）发布。&#10;&#10;您可以在 GPL-3.0 或（由您选择）任意后续版本的条款下使用、研究、修改并再分发本软件。若您再分发修改后的版本，必须一并以同一许可证提供对应的源代码。&#10;&#10;本软件按「现状」提供，不提供任何形式的担保。&#10;&#10;许可全文随安装包分发，见安装目录里的 LICENSE 文件；第三方组件及其许可列在同一目录的 THIRD_PARTY_LICENSES.md 里。"/>
+        <Control Id="AcceptCheck" Type="CheckBox" X="20" Y="218" Width="330" Height="17"
+                 Property="LicenseAccepted" CheckBoxValue="1" Text="我接受许可协议中的条款。"/>
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0"/>
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="上一步">
+          <Publish Event="NewDialog" Value="WelcomeDlg"/>
+        </Control>
+        <!--
+          「必须勾选才能下一步」的两道闸：
+
+          1) ControlCondition（Disable/Enable）：没勾时「下一步」是灰的，勾上就恢复。
+             ⚠ 这张表要有**两行**才有正确语义：只有 Enable 行的话，"没勾"时条件为假、
+             什么动作都不做，控件保持 MSI 的默认状态——也就是**可点**。这正是旧版本
+             "不打勾也能点下一步"的根因（EnableCondition 只写了 Enable 一行）。
+          2) Publish 的 Condition：不勾时**不发生页面跳转**。就算控件状态被别的机制
+             改回可点，点下去也不会走到下一页——许可协议不是"建议"，是闸门。
+
+          两条同时在：灰按钮给出视觉反馈，条件跳转给出行为保证。
+        -->
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="下一步"
+                 DisableCondition="NOT LicenseAccepted" EnableCondition="LicenseAccepted">
+          <Publish Event="NewDialog" Value="InstallDirDlg" Condition="LicenseAccepted"/>
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="取消">
+          <Publish Event="EndDialog" Value="Exit"/>
+        </Control>
+      </Dialog>
+
+      <!--
+        3) 安装位置（版式照 LocalSend：一个能改的路径框占主位，下面一句话说清装到哪）
+
+        ⚠ PathEdit 必须加 Indirect="yes"（wixl 原版没加）。
+        WIXUI_INSTALLDIR 的值是目录属性**名**（"INSTALLFOLDER"）而非路径；不加 Indirect 时控件把
+        字符串 "INSTALLFOLDER" 当路径用，创建对话框的瞬间就触发
+          MSI 错误 1314「指定的路径 "INSTALLFOLDER" 不可用」（并连带 2867 error dialog not set）
+        加 Indirect 后控件改绑 INSTALLFOLDER 目录属性（其值是 CostFinalize 算出的真实路径），
+        与 WiX 官方 WixUI 的 BrowseDlg / InstallDirDlg 写法一致（Property="_BrowseProperty" Indirect="yes"）
+
+        改版式的原因：这一页原来摆着一个 DirectoryList（目录树）+ 下面一行小路径框。
+        那个目录树在 per-user 包里**只有 LocalAppData\Programs\LinkX 一条**，
+        于是屏幕上是一个几乎空的大列表框 —— 用户看到的是"这安装器不会挑文件夹"，
+        看着别扭、也不敢用。改成像 LocalSend 那样：一行宽路径框（可直接改盘符）占主位，
+        下面一句话交代装到哪。路径改完照样装、卸载也照样找得回来
+        （靠上面那条 InstallDir 回读；下一页的 SetTargetPath 负责把改后的路径落到目录上）。
+      -->
+      <Dialog Id="InstallDirDlg" Width="370" Height="270" Title="[ProductName] 安装位置">
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0"/>
+        <Control Id="Title" Type="Text" X="20" Y="15" Width="330" Height="18" Transparent="yes" NoPrefix="yes"
+                 Text="安装位置"/>
+        <Control Id="Description" Type="Text" X="20" Y="52" Width="330" Height="20" Transparent="yes" NoPrefix="yes"
+                 Text="您想将 [ProductName] 安装在哪个文件夹？"/>
+        <Control Id="PathEdit" Type="PathEdit" X="20" Y="78" Width="330" Height="18"
+                 Property="WIXUI_INSTALLDIR" Indirect="yes"/>
+        <Control Id="InstallHint" Type="Text" X="20" Y="104" Width="330" Height="30" Transparent="yes" NoPrefix="yes"
+                 Text="安装程序将把 [ProductName] 安装到上面的文件夹。&#10;想装到别的盘，直接把路径改成 D:\LinkX 这样的完整路径即可。"/>
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0"/>
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="上一步">
+          <Publish Event="NewDialog" Value="LicenseDlg"/>
+        </Control>
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="下一步">
+          <Publish Event="SetTargetPath" Value="[WIXUI_INSTALLDIR]" Order="1"/>
+          <Publish Event="NewDialog" Value="ComponentsDlg" Order="2"/>
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="取消">
+          <Publish Event="EndDialog" Value="Exit"/>
+        </Control>
+      </Dialog>
+
+      <!-- 4) Components (checkboxes publish AddLocal/RemoveLocal feature selection) -->
+      <Dialog Id="ComponentsDlg" Width="370" Height="270" Title="[ProductName] 组件选择">
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0"/>
+        <Control Id="Title" Type="Text" X="20" Y="15" Width="330" Height="18" Transparent="yes" NoPrefix="yes"
+                 Text="组件选择"/>
+        <Control Id="Description" Type="Text" X="20" Y="52" Width="330" Height="20" Transparent="yes" NoPrefix="yes"
+                 Text="勾选要一并安装的可选组件。以后重新运行这个安装程序就能改。"/>
+        <Control Id="ChkStartMenu" Type="CheckBox" X="25" Y="90" Width="330" Height="17"
+                 Property="OPT_STARTMENU" CheckBoxValue="1" Text="创建开始菜单快捷方式（推荐）"/>
+        <Control Id="ChkAutoStart" Type="CheckBox" X="25" Y="120" Width="330" Height="17"
+                 Property="OPT_AUTOSTART" CheckBoxValue="1" Text="登录 Windows 时自动启动 LinkX"/>
+        <Control Id="ChkFirewall" Type="CheckBox" X="25" Y="150" Width="330" Height="34"
+                 Property="OPT_FIREWALL" CheckBoxValue="1"
+                 Text="添加 Windows 防火墙入站规则（TCP 55676，仅专用网络）。这条需要管理员权限，没提权时会被跳过。"/>
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0"/>
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="上一步">
+          <Publish Event="NewDialog" Value="InstallDirDlg"/>
+        </Control>
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="下一步">
+          <Publish Event="AddLocal" Value="StartMenuFeature" Condition='OPT_STARTMENU="1"' Order="1"/>
+          <Publish Event="Remove" Value="StartMenuFeature" Condition='NOT OPT_STARTMENU="1"' Order="2"/>
+          <Publish Event="AddLocal" Value="AutoStartFeature" Condition='OPT_AUTOSTART="1"' Order="3"/>
+          <Publish Event="Remove" Value="AutoStartFeature" Condition='NOT OPT_AUTOSTART="1"' Order="4"/>
+          <Publish Event="AddLocal" Value="FirewallFeature" Condition='OPT_FIREWALL="1"' Order="5"/>
+          <Publish Event="Remove" Value="FirewallFeature" Condition='NOT OPT_FIREWALL="1"' Order="6"/>
+          <Publish Event="NewDialog" Value="VerifyReadyDlg" Order="7"/>
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="取消">
+          <Publish Event="EndDialog" Value="Exit"/>
+        </Control>
+      </Dialog>
+
+      <!-- 5) Confirm -->
+      <Dialog Id="VerifyReadyDlg" Width="370" Height="270" Title="[ProductName] 准备安装">
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0"/>
+        <Control Id="Title" Type="Text" X="20" Y="15" Width="330" Height="18" Transparent="yes" NoPrefix="yes"
+                 Text="准备安装"/>
+        <!--
+          摘要行两条约束：
+          1) 目录必须写 [INSTALLFOLDER]（目录属性，值为真实路径）；写 [WIXUI_INSTALLDIR] 只会展开出
+             字面量 "INSTALLFOLDER"（该属性的值就是目录属性名）。
+          2) 选项行不能写死 "optional"，要用成对的 Text + ShowCondition 随 OPT_* 显示 Yes / No
+             （v5 的 Control 不收 Condition 子元素，只能用属性）。
+        -->
+        <Control Id="VerifyText" Type="Text" X="20" Y="60" Width="330" Height="18" Transparent="yes" NoPrefix="yes"
+                 Text="安装程序已准备好安装 [ProductName] [ProductVersion]。"/>
+        <Control Id="VerifyDir" Type="Text" X="20" Y="82" Width="330" Height="16" Transparent="yes" NoPrefix="yes"
+                 Text="安装到：[INSTALLFOLDER]"/>
+        <Control Id="OptStartYes" Type="Text" X="20" Y="104" Width="330" Height="14" Transparent="yes" NoPrefix="yes"
+                 Text="开始菜单快捷方式：是" Hidden="yes" ShowCondition='OPT_STARTMENU="1"'/>
+        <Control Id="OptStartNo" Type="Text" X="20" Y="104" Width="330" Height="14" Transparent="yes" NoPrefix="yes"
+                 Text="开始菜单快捷方式：否" Hidden="yes" ShowCondition='NOT OPT_STARTMENU="1"'/>
+        <Control Id="OptAutoYes" Type="Text" X="20" Y="120" Width="330" Height="14" Transparent="yes" NoPrefix="yes"
+                 Text="开机自动启动：是" Hidden="yes" ShowCondition='OPT_AUTOSTART="1"'/>
+        <Control Id="OptAutoNo" Type="Text" X="20" Y="120" Width="330" Height="14" Transparent="yes" NoPrefix="yes"
+                 Text="开机自动启动：否" Hidden="yes" ShowCondition='NOT OPT_AUTOSTART="1"'/>
+        <Control Id="OptFwYes" Type="Text" X="20" Y="136" Width="330" Height="14" Transparent="yes" NoPrefix="yes"
+                 Text="防火墙规则：是" Hidden="yes" ShowCondition='OPT_FIREWALL="1"'/>
+        <Control Id="OptFwNo" Type="Text" X="20" Y="136" Width="330" Height="14" Transparent="yes" NoPrefix="yes"
+                 Text="防火墙规则：否" Hidden="yes" ShowCondition='NOT OPT_FIREWALL="1"'/>
+        <Control Id="VerifyHint" Type="Text" X="20" Y="162" Width="330" Height="30" Transparent="yes" NoPrefix="yes"
+                 Text="点击「安装」开始，或点「上一步」回去改。"/>
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0"/>
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="上一步">
+          <Publish Event="NewDialog" Value="ComponentsDlg"/>
+        </Control>
+        <Control Id="Install" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="安装">
+          <Publish Event="EndDialog" Value="Return"/>
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="取消">
+          <Publish Event="EndDialog" Value="Exit"/>
+        </Control>
+      </Dialog>
+
+      <!-- 6) Progress -->
+      <Dialog Id="ProgressDlg" Width="370" Height="270" Title="[ProductName] 正在安装" Modeless="yes">
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0"/>
+        <Control Id="Title" Type="Text" X="20" Y="15" Width="330" Height="18" Transparent="yes" NoPrefix="yes"
+                 Text="正在安装 [ProductName]"/>
+        <Control Id="TextInstalling" Type="Text" X="20" Y="60" Width="330" Height="30" Transparent="yes" NoPrefix="yes"
+                 Text="请稍候，安装程序正在把 [ProductName] 装到您的电脑上。"/>
+        <Control Id="StatusLabel" Type="Text" X="20" Y="100" Width="60" Height="15" Transparent="yes" NoPrefix="yes" Text="状态："/>
+        <Control Id="ActionText" Type="Text" X="80" Y="100" Width="270" Height="15" TabSkip="no">
+          <Subscribe Event="ActionText" Attribute="Text"/>
+        </Control>
+        <Control Id="ProgressBar" Type="ProgressBar" X="20" Y="120" Width="330" Height="12" ProgressBlocks="yes" Text="进度">
+          <Subscribe Event="SetProgress" Attribute="Progress"/>
+        </Control>
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0"/>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="取消">
+          <Publish Event="EndDialog" Value="Exit"/>
+        </Control>
+      </Dialog>
+
+      <!--
+        已经装过之后再双击安装包：原先没有任何页面，向导直接走完 —— 静默重装一遍、
+        顺手把正在运行的 LinkX 结束掉，用户完全不知道发生了什么（想"改个安装目录"的人
+        撞上的就是这一面）。这一页把三条路摆出来：修一下、卸掉、什么都不做。
+        换安装目录没有单独给按钮：MSI 的"更改"要走功能选择页，而可选组件只有
+        快捷方式/自启/防火墙三项，路径改不了；要挪位置就是先卸载再装一次。
+      -->
+      <Dialog Id="MaintenanceDlg" Width="370" Height="270" Title="[ProductName] 已安装">
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0"/>
+        <Control Id="Title" Type="Text" X="20" Y="15" Width="330" Height="18" Transparent="yes" NoPrefix="yes"
+                 Text="[ProductName] 已经在这台电脑上"/>
+        <Control Id="MaintText" Type="Text" X="20" Y="60" Width="330" Height="60" Transparent="yes" NoPrefix="yes"
+                 Text="当前装的是 [ProductVersion]。&#10;&#10;「修复」重新装一遍同一份文件；「卸载」把程序和它的配置、配对信息一起清掉。&#10;想换个盘装：先卸载，再运行安装包选目录。"/>
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0"/>
+        <Control Id="Repair" Type="PushButton" X="20" Y="243" Width="56" Height="17" Text="修复">
+          <Publish Event="Reinstall" Value="ALL" Order="1"/>
+          <Publish Event="EndDialog" Value="Return" Order="2"/>
+        </Control>
+        <Control Id="Remove" Type="PushButton" X="82" Y="243" Width="56" Height="17" Text="卸载">
+          <Publish Event="Remove" Value="ALL" Order="1"/>
+          <Publish Event="EndDialog" Value="Return" Order="2"/>
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Default="yes" Cancel="yes" Text="取消">
+          <Publish Event="EndDialog" Value="Exit"/>
+        </Control>
+      </Dialog>
+
+      <!-- 7) Finish -->
+      <Dialog Id="ExitDialog" Width="370" Height="270" Title="[ProductName] 安装完成">
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0"/>
+        <Control Id="Title" Type="Text" X="20" Y="15" Width="330" Height="18" Transparent="yes" NoPrefix="yes"
+                 Text="安装完成"/>
+        <Control Id="ExitText" Type="Text" X="20" Y="60" Width="330" Height="80" Transparent="yes" NoPrefix="yes"
+                 Text="[ProductName] [ProductVersion] 已经装好了。&#10;&#10;您可以从桌面或开始菜单启动 LinkX。点击「完成」关闭本向导。"
+                 Hidden="yes" ShowCondition="NOT REMOVE"/>
+        <Control Id="ExitTextRemoved" Type="Text" X="20" Y="60" Width="330" Height="80" Transparent="yes" NoPrefix="yes"
+                 Text="[ProductName] 已经卸载，程序文件与配置都清掉了。&#10;&#10;重新安装之后要与手机重新配一次对。"
+                 Hidden="yes" ShowCondition="REMOVE"/>
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0"/>
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Disabled="yes" Text="上一步"/>
+        <Control Id="Finish" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Cancel="yes" Text="完成">
+          <Publish Event="EndDialog" Value="Return"/>
+        </Control>
+      </Dialog>
+
+      <InstallUISequence>
+        <Show Dialog="WelcomeDlg" Before="ProgressDlg" Overridable="yes" Condition="NOT Installed"/>
+        <Show Dialog="MaintenanceDlg" Before="ProgressDlg" Overridable="yes"
+              Condition="Installed AND NOT REMOVE AND NOT REINSTALL"/>
+        <Show Dialog="ProgressDlg" Before="ExecuteAction" Overridable="yes"/>
+        <Show Dialog="ExitDialog" OnExit="success" Overridable="yes"/>
+      </InstallUISequence>
+    </UI>
+  </Fragment>
+</Wix>
